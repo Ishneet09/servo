@@ -1,0 +1,166 @@
+{
+  "entries": {
+    "brew": {
+      "gnutls": {
+        "version": "3.6.11.1",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gnutls-3.6.11.1.catalina.bottle.tar.gz",
+              "sha256": "00b17bc3c4c3a74318a582cc45068042b8bd74ea96fac02116e71772a2355dc1"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gnutls-3.6.11.1.mojave.bottle.tar.gz",
+              "sha256": "ee8df35a8efcb0595f454d980da7d46da5420d32b99c76f29d70c3f43bfb3c2d"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gnutls-3.6.11.1.high_sierra.bottle.tar.gz",
+              "sha256": "bff8a1931f8a8fc192a3f2e2b37c6fb2dd45657769cb3ee373520ddd9bf3c515"
+            }
+          }
+        }
+      },
+      "gstreamer": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gstreamer-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "3473eef6aadd51a378f722c08a399922c4b401f38d8d5bffe7e2cb0ba845f919"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gstreamer-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "6427cd64ac1c541d35fc57f869dd1290e57aab8a2a9f5589b79f6e078e4432d5"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gstreamer-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "b1a6cbfbac2bb152ce023fbe283ef38ec371ceccff48ae1545cdeac1a36933ba"
+            }
+          }
+        }
+      },
+      "gst-plugins-base": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-base-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "64e4395ec1d40677cfc8b21eaf6815296f44660aab0b4a125735f266552dad95"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-base-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "5a4245b5251ec3c8ef12a8278101c84c4db8a8892114a53e6a3304569571caba"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-base-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "d9144e2a0c20e479c341167a8aa9ecc87e65a9c7c9515a62a855785cb1d42252"
+            }
+          }
+        }
+      },
+      "gst-libav": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": ":any",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gst-libav-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "dce5e4261059fa2fc2e14eb4db2f43cfdf749eee11140539b3f1c3c74af25198"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gst-libav-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "999e32d952de88b5578a3906fe922b135827738ac9b16afcd542bc9ba01d2d21"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gst-libav-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "281dc5fd5d4a0f558b653d7054303fbd30308feb73d2c4e37811d8389d28b6ad"
+            }
+          }
+        }
+      },
+      "gst-plugins-bad": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-bad-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "63f81fed651c70e685fcf9c861696d24a0bac6423f5aa3735ea018a32ac6caab"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-bad-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "90b329e830c751c20fe9b201944513d1ef0f27387f946121ef6f7bb291867422"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-bad-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "8309b54a20894146c48601f9d72a9b778eae5b45fa9c262b2c66e4fb429ed0b4"
+            }
+          }
+        }
+      },
+      "gst-plugins-good": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-good-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "4ea6d0ea1dcc6c20afbd0976006a84d57067b83926aa74bd28a0d21b4afa1aa9"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-good-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "5bab7c207014dad9b950247148d930251fba89458f97527b9fb076a1a5a843ca"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gst-plugins-good-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "0af59390678c89f8a5c396afcd63e5b1d95d84dad217c61860db6adc3f8c2539"
+            }
+          }
+        }
+      },
+      "gst-rtsp-server": {
+        "version": "1.16.2",
+        "bottle": {
+          "cellar": "/usr/local/Cellar",
+          "prefix": "/usr/local",
+          "files": {
+            "catalina": {
+              "url": "https://homebrew.bintray.com/bottles/gst-rtsp-server-1.16.2.catalina.bottle.tar.gz",
+              "sha256": "30d213fe81eece2d6a566c7d53ea36f9f3ee24219aa7b0be4edf15d46559cc03"
+            },
+            "mojave": {
+              "url": "https://homebrew.bintray.com/bottles/gst-rtsp-server-1.16.2.mojave.bottle.tar.gz",
+              "sha256": "fc5d1f94602dc377f2d6938ed5f97e1a104958fbfeb26e48598e18c0dd0ca9ca"
+            },
+            "high_sierra": {
+              "url": "https://homebrew.bintray.com/bottles/gst-rtsp-server-1.16.2.high_sierra.bottle.tar.gz",
+              "sha256": "94e6f9c451be9c5f2e3b3a92d7450b730b3cea49c85f1e03cd8348943385a311"
+            }
+          }
+        }
+      },
+      "openssl": null
+    }
+  },
+  "system": {
+    "macos": {
+      "mojave": {
+        "HOMEBREW_VERSION": "2.2.4",
+        "HOMEBREW_PREFIX": "/usr/local",
+        "Homebrew/homebrew-core": "1ff573fe3ffa9db3d7884cb53369201d44fbf8a2",
+        "CLT": "10.3.0.0.1.1562985497",
+        "Xcode": "11.3.1",
+        "macOS": "10.14.6"
+      }
+    }
+  }
+}

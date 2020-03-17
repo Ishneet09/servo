@@ -1310,6 +1310,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom"
+version = "0.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8d3787f803da8d85526f8307b50b5d6aa96608becfee5ef1a62d70e45640e09"
+
+[[package]]
 name = "dom_struct"
 version = "0.0.1"
 dependencies = [
@@ -4724,6 +4730,7 @@ dependencies = [
  "cssparser",
  "deny_public_fields",
  "devtools_traits",
+ "dom",
  "dom_struct",
  "domobject_derive",
  "embedder_traits",
@@ -4764,6 +4771,7 @@ dependencies = [
  "phf_shared",
  "pixels",
  "profile_traits",
+ "rand",
  "ref_filter_map",
  "ref_slice",
  "regex",

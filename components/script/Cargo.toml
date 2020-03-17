@@ -48,6 +48,7 @@ crossbeam-channel = "0.3"
 cssparser = "0.27"
 deny_public_fields = {path = "../deny_public_fields"}
 devtools_traits = {path = "../devtools_traits"}
+dom = "0.0.0"
 dom_struct = {path = "../dom_struct"}
 domobject_derive = {path = "../domobject_derive"}
 embedder_traits = {path = "../embedder_traits"}
@@ -85,6 +86,7 @@ percent-encoding = "2.0"
 phf = "0.8"
 pixels = {path = "../pixels"}
 profile_traits = {path = "../profile_traits"}
+rand = "0.7"
 ref_filter_map = "1.0.1"
 ref_slice = "1.0"
 regex = "1.1"

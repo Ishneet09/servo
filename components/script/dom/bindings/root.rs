@@ -30,6 +30,7 @@ use crate::dom::bindings::reflector::{DomObject, Reflector};
 use crate::dom::bindings::trace::trace_reflector;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::node::Node;
+use crate::dom::doge::Doge;
 use js::jsapi::{Heap, JSObject, JSTracer};
 use js::rust::GCMethods;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
@@ -80,6 +81,24 @@ pub unsafe trait StableTraceObject {
     fn stable_trace_object(&self) -> *const dyn JSTraceable;
 }
 
+
+unsafe impl StableTraceObject for Doge
+
+{
+    fn stable_trace_object<'a>(&'a self) -> *const dyn JSTraceable{
+
+        #[allow(unrooted_must_root)]
+        struct ReflectorStackRoot(Reflector);
+        unsafe impl JSTraceable for ReflectorStackRoot {
+            unsafe fn trace(&self, tracer: *mut JSTracer) {
+                trace_reflector(tracer, "on stack", &self.0);
+            }
+        }
+        unsafe { &*(self.reflector() as *const Reflector as *const ReflectorStackRoot) }
+
+    }
+}
+
 unsafe impl<T> StableTraceObject for Dom<T>
 where
     T: DomObject,
@@ -98,6 +117,8 @@ where
         unsafe { &*(self.reflector() as *const Reflector as *const ReflectorStackRoot) }
     }
 }
+
+
 
 impl<T> Deref for Root<T>
 where
