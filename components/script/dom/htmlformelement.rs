@@ -243,6 +243,40 @@ impl HTMLFormElementMethods for HTMLFormElement {
         self.submit(SubmittedFrom::FromForm, FormSubmitter::FormElement(self));
     }
 
+
+    //request_submit API
+    fn requestSubmit(&self, submitter: HTMLFormElement) -> Fallible<DOMString>{
+
+        //step1: check if submitter is not null
+        if submitter{
+       
+        //step2: if step1, check if submittter is not a submit button-throw error
+           
+            if !is_submit_button(submitter){
+                let error = get_error_data_by_code(TYPE_MISMATCH_ERR);
+                return error;
+            }
+       
+        //step3: if submitter's form  owner isn't the current element, throw error
+            let controlObject = submitter.as_maybe_form_control();
+            let submitterFormOwner = controlObject.form_owner();
+            let selfFormOwner = self.form_owner();
+
+            if submitterFormOwner != selfFormOwner{
+                return Err(Error::Type("Not Found Error".to_string()));
+            }
+        }
+
+        //step4: step1 ka else:- set submitter to this form element
+        else{
+            submitter = self.set_form_owner();
+        }
+
+        //step 5: submit() fn ka use
+        submitter.submit(SubmittedFrom::FromForm, FormSubmitter::FormElement(submitter));
+    }
+
+    
     // https://html.spec.whatwg.org/multipage/#dom-form-reset
     fn Reset(&self) {
         self.reset(ResetFrom::FromForm);
@@ -1518,6 +1552,20 @@ pub trait FormControl: DomObject {
         } else {
             self.form_owner().map_or(false, |t| owner(&t))
         }
+    }
+
+
+    fn is_submit_button(submitter: HTMLFormElement) -> bool{
+       
+        let typeCheck = submitter.get_attribute(&self, name: 'type');
+
+        if assert!(typeCheck, "submit"){
+           return true;
+        }
+        else{
+            return false;
+        }
+           
     }
 
     // XXXKiChjang: Implement these on inheritors
