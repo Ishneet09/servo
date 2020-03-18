@@ -558,6 +558,19 @@ impl ServoParser {
                 Err(script) => script,
             };
 
+            // https://html.spec.whatwg.org/multipage/#parsing-main-incdata
+            // branch "An end tag whose tag name is "script"
+            // The spec says to perform the microtask checkpoint before
+            // setting the insertion mode back from Text, but this is not
+            // possible with the way servo and html5ever currently
+            // relate to each other, and hopefully it is not observable.
+            if is_execution_stack_empty() {
+                self.document
+                    .window()
+                    .upcast::<GlobalScope>()
+                    .perform_a_microtask_checkpoint();
+            }
+
             let script_nesting_level = self.script_nesting_level.get();
 
             self.script_nesting_level.set(script_nesting_level + 1);
@@ -937,12 +950,29 @@ pub struct FragmentContext<'a> {
 }
 
 #[allow(unrooted_must_root)]
-fn insert(parent: &Node, reference_child: Option<&Node>, child: NodeOrText<Dom<Node>>) {
+fn insert(
+    parent: &Node,
+    reference_child: Option<&Node>,
+    child: NodeOrText<Dom<Node>>,
+    parsing_algorithm: ParsingAlgorithm,
+) {
     match child {
         NodeOrText::AppendNode(n) => {
+            // https://html.spec.whatwg.org/multipage/#insert-a-foreign-element
+            // applies if this is an element; if not, it may be
+            // https://html.spec.whatwg.org/multipage/#insert-a-comment
+            let element_in_non_fragment =
+                parsing_algorithm != ParsingAlgorithm::Fragment && n.is::<Element>();
+            if element_in_non_fragment {
+                ScriptThread::push_new_element_queue();
+            }
             parent.InsertBefore(&n, reference_child).unwrap();
+            if element_in_non_fragment {
+                ScriptThread::pop_current_element_queue();
+            }
         },
         NodeOrText::AppendText(t) => {
+            // https://html.spec.whatwg.org/multipage/#insert-a-character
             let text = reference_child
                 .and_then(Node::GetPreviousSibling)
                 .or_else(|| parent.GetLastChild())
@@ -1092,7 +1122,7 @@ impl TreeSink for Sink {
             .GetParentNode()
             .expect("append_before_sibling called on node without parent");
 
-        insert(&parent, Some(&*sibling), new_node);
+        insert(&parent, Some(&*sibling), new_node, self.parsing_algorithm);
     }
 
     fn parse_error(&mut self, msg: Cow<'static, str>) {
@@ -1109,7 +1139,7 @@ impl TreeSink for Sink {
     }
 
     fn append(&mut self, parent: &Dom<Node>, child: NodeOrText<Dom<Node>>) {
-        insert(&parent, None, child);
+        insert(&parent, None, child, self.parsing_algorithm);
     }
 
     fn append_based_on_parent_node(

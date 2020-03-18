@@ -22,6 +22,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::htmlformelement::{FormControl, HTMLFormElement};
+use crate::dom::htmlinputelement::HTMLInputElement;
 use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{document_from_node, window_from_node};
 use crate::dom::node::{
@@ -173,6 +174,11 @@ impl HTMLTextAreaElement {
         )
     }
 
+    pub fn auto_directionality(&self) -> String {
+        let value: String = self.Value().to_string();
+        return HTMLInputElement::directionality_from_value(&value);
+    }
+
     fn update_placeholder_shown_state(&self) {
         let has_placeholder = !self.placeholder.borrow().is_empty();
         let has_value = !self.textinput.borrow().is_empty();
@@ -205,6 +211,12 @@ impl HTMLTextAreaElementMethods for HTMLTextAreaElement {
     // https://html.spec.whatwg.org/multipage/#dom-textarea-cols
     make_limited_uint_setter!(SetCols, "cols", DEFAULT_COLS);
 
+    // https://html.spec.whatwg.org/multipage/#dom-input-dirName
+    make_getter!(DirName, "dirname");
+
+    // https://html.spec.whatwg.org/multipage/#dom-input-dirName
+    make_setter!(SetDirName, "dirname");
+
     // https://html.spec.whatwg.org/multipage/#dom-fe-disabled
     make_bool_getter!(Disabled, "disabled");
 
@@ -220,7 +232,7 @@ impl HTMLTextAreaElementMethods for HTMLTextAreaElement {
     make_getter!(Name, "name");
 
     // https://html.spec.whatwg.org/multipage/#attr-fe-name
-    make_setter!(SetName, "name");
+    make_atomic_setter!(SetName, "name");
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-placeholder
     make_getter!(Placeholder, "placeholder");

@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::enter_realm;
 use crate::devtools;
 use crate::dom::abstractworker::WorkerScriptMsg;
 use crate::dom::abstractworkerglobalscope::{run_worker_event_loop, WorkerEventLoopMethods};
@@ -23,6 +22,7 @@ use crate::dom::messageevent::MessageEvent;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::fetch::load_whole_resource;
+use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::{
     new_rt_and_cx, CommonScriptMsg, JSContext as SafeJSContext, Runtime, ScriptChan,
 };
@@ -447,8 +447,10 @@ impl ServiceWorkerGlobalScope {
 
 #[allow(unsafe_code)]
 unsafe extern "C" fn interrupt_callback(cx: *mut JSContext) -> bool {
-    let worker = DomRoot::downcast::<WorkerGlobalScope>(GlobalScope::from_context(cx))
-        .expect("global is not a worker scope");
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    let global = GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof));
+    let worker =
+        DomRoot::downcast::<WorkerGlobalScope>(global).expect("global is not a worker scope");
     assert!(worker.is::<ServiceWorkerGlobalScope>());
 
     // A false response causes the script to terminate

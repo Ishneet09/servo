@@ -21,6 +21,7 @@ mod capabilities;
 use crate::actions::{InputSourceState, PointerInputState};
 use base64;
 use capabilities::ServoCapabilities;
+use compositing::ConstellationMsg;
 use crossbeam_channel::{after, unbounded, Receiver, Sender};
 use euclid::{Rect, Size2D};
 use hyper::Method;
@@ -34,7 +35,7 @@ use script_traits::webdriver_msg::{LoadStatus, WebDriverCookieError, WebDriverFr
 use script_traits::webdriver_msg::{
     WebDriverJSError, WebDriverJSResult, WebDriverJSValue, WebDriverScriptCommand,
 };
-use script_traits::{ConstellationMsg, LoadData, LoadOrigin, WebDriverCommandMsg};
+use script_traits::{LoadData, LoadOrigin, WebDriverCommandMsg};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde::ser::{Serialize, Serializer};
 use serde_json::{json, Value};
@@ -1582,7 +1583,7 @@ impl Handler {
         let rgb = RgbImage::from_raw(img.width, img.height, img.bytes.to_vec()).unwrap();
         let mut png_data = Vec::new();
         DynamicImage::ImageRgb8(rgb)
-            .write_to(&mut png_data, ImageFormat::PNG)
+            .write_to(&mut png_data, ImageFormat::Png)
             .unwrap();
 
         Ok(base64::encode(&png_data))

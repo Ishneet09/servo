@@ -33,7 +33,9 @@ use net::connector::{create_tls_config, ALPN_H2_H1};
 use net::fetch::cors_cache::CorsCache;
 use net::fetch::methods::{self, CancellationListener, FetchContext};
 use net::filemanager_thread::FileManager;
+use net::resource_thread::CoreResourceThreadPool;
 use net::test::HttpState;
+use net_traits::filemanager_thread::FileTokenCheck;
 use net_traits::request::Request;
 use net_traits::response::Response;
 use net_traits::{FetchTaskTarget, ResourceFetchTiming, ResourceTimingType};
@@ -42,7 +44,7 @@ use servo_arc::Arc as ServoArc;
 use servo_url::ServoUrl;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::net::TcpListener;
 use tokio::reactor::Handle;
 use tokio::runtime::Runtime;
@@ -86,15 +88,18 @@ fn create_embedder_proxy() -> EmbedderProxy {
 fn new_fetch_context(
     dc: Option<Sender<DevtoolsControlMsg>>,
     fc: Option<EmbedderProxy>,
+    pool_handle: Option<Weak<CoreResourceThreadPool>>,
 ) -> FetchContext {
     let certs = resources::read_string(Resource::SSLCertificates);
     let tls_config = create_tls_config(&certs, ALPN_H2_H1);
     let sender = fc.unwrap_or_else(|| create_embedder_proxy());
+
     FetchContext {
         state: Arc::new(HttpState::new(tls_config)),
         user_agent: DEFAULT_USER_AGENT.into(),
         devtools_chan: dc,
-        filemanager: FileManager::new(sender),
+        filemanager: FileManager::new(sender, pool_handle.unwrap_or_else(|| Weak::new())),
+        file_token: FileTokenCheck::NotRequired,
         cancellation_listener: Arc::new(Mutex::new(CancellationListener::new(None))),
         timing: ServoArc::new(Mutex::new(ResourceFetchTiming::new(
             ResourceTimingType::Navigation,
@@ -113,7 +118,7 @@ impl FetchTaskTarget for FetchResponseCollector {
 }
 
 fn fetch(request: &mut Request, dc: Option<Sender<DevtoolsControlMsg>>) -> Response {
-    fetch_with_context(request, &mut new_fetch_context(dc, None))
+    fetch_with_context(request, &mut new_fetch_context(dc, None, None))
 }
 
 fn fetch_with_context(request: &mut Request, mut context: &mut FetchContext) -> Response {
@@ -133,7 +138,7 @@ fn fetch_with_cors_cache(request: &mut Request, cache: &mut CorsCache) -> Respon
         request,
         cache,
         &mut target,
-        &mut new_fetch_context(None, None),
+        &mut new_fetch_context(None, None, None),
     );
 
     receiver.recv().unwrap()

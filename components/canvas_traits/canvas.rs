@@ -44,10 +44,11 @@ pub enum Canvas2dMsg {
     Clip,
     ClosePath,
     Ellipse(Point2D<f32>, f32, f32, f32, f32, f32, bool),
-    Fill,
-    FillText(String, f64, f64, Option<f64>),
-    FillRect(Rect<f32>),
+    Fill(FillOrStrokeStyle),
+    FillText(String, f64, f64, Option<f64>, FillOrStrokeStyle),
+    FillRect(Rect<f32>, FillOrStrokeStyle),
     GetImageData(Rect<u64>, Size2D<u64>, IpcBytesSender),
+    GetTransform(IpcSender<Transform2D<f32>>),
     IsPointInPath(f64, f64, FillRule, IpcSender<bool>),
     LineTo(Point2D<f32>),
     MoveTo(Point2D<f32>),
@@ -56,10 +57,8 @@ pub enum Canvas2dMsg {
     Rect(Rect<f32>),
     RestoreContext,
     SaveContext,
-    StrokeRect(Rect<f32>),
-    Stroke,
-    SetFillStyle(FillOrStrokeStyle),
-    SetStrokeStyle(FillOrStrokeStyle),
+    StrokeRect(Rect<f32>, FillOrStrokeStyle),
+    Stroke(FillOrStrokeStyle),
     SetLineWidth(f32),
     SetLineCap(LineCapStyle),
     SetLineJoin(LineJoinStyle),
@@ -256,6 +255,7 @@ pub enum CompositionStyle {
     Copy,
     Lighter,
     Xor,
+    Clear,
 }
 
 impl FromStr for CompositionStyle {
@@ -274,6 +274,7 @@ impl FromStr for CompositionStyle {
             "copy" => Ok(CompositionStyle::Copy),
             "lighter" => Ok(CompositionStyle::Lighter),
             "xor" => Ok(CompositionStyle::Xor),
+            "clear" => Ok(CompositionStyle::Clear),
             _ => Err(()),
         }
     }
@@ -293,6 +294,7 @@ impl CompositionStyle {
             CompositionStyle::Copy => "copy",
             CompositionStyle::Lighter => "lighter",
             CompositionStyle::Xor => "xor",
+            CompositionStyle::Clear => "clear",
         }
     }
 }

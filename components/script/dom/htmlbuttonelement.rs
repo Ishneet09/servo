@@ -142,7 +142,7 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
     make_getter!(Name, "name");
 
     // https://html.spec.whatwg.org/multipage/#dom-fe-name
-    make_setter!(SetName, "name");
+    make_atomic_setter!(SetName, "name");
 
     // https://html.spec.whatwg.org/multipage/#dom-button-value
     make_getter!(Value, "value");
@@ -290,13 +290,6 @@ impl Activatable for HTMLButtonElement {
         !self.upcast::<Element>().disabled_state()
     }
 
-    // https://html.spec.whatwg.org/multipage/#run-pre-click-activation-steps
-    // https://html.spec.whatwg.org/multipage/#the-button-element:activation-behavior
-    fn pre_click_activation(&self) {}
-
-    // https://html.spec.whatwg.org/multipage/#run-canceled-activation-steps
-    fn canceled_activation(&self) {}
-
     // https://html.spec.whatwg.org/multipage/#run-post-click-activation-steps
     fn activation_behavior(&self, _event: &Event, _target: &EventTarget) {
         let ty = self.button_type.get();
@@ -307,7 +300,7 @@ impl Activatable for HTMLButtonElement {
                 if let Some(owner) = self.form_owner() {
                     owner.submit(
                         SubmittedFrom::NotFromForm,
-                        FormSubmitter::ButtonElement(self.clone()),
+                        FormSubmitter::ButtonElement(self),
                     );
                 }
             },

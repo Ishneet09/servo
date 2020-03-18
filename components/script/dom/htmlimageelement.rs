@@ -13,7 +13,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLImageElementBinding::HTMLImageE
 use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
@@ -163,6 +163,23 @@ pub struct HTMLImageElement {
 impl HTMLImageElement {
     pub fn get_url(&self) -> Option<ServoUrl> {
         self.current_request.borrow().parsed_url.clone()
+    }
+    // https://html.spec.whatwg.org/multipage/#check-the-usability-of-the-image-argument
+    pub fn is_usable(&self) -> Fallible<bool> {
+        // If image has an intrinsic width or intrinsic height (or both) equal to zero, then return bad.
+        if let Some(image) = &self.current_request.borrow().image {
+            if image.width == 0 || image.height == 0 {
+                return Ok(false);
+            }
+        }
+
+        match self.current_request.borrow().state {
+            // If image's current request's state is broken, then throw an "InvalidStateError" DOMException.
+            State::Broken => Err(Error::InvalidState),
+            State::CompletelyAvailable => Ok(true),
+            // If image is not fully decodable, then return bad.
+            State::PartiallyAvailable | State::Unavailable => Ok(false),
+        }
     }
 }
 
@@ -826,6 +843,8 @@ impl HTMLImageElement {
             // Step 8
             Some(data) => data,
             None => {
+                self.abort_request(State::Broken, ImageRequestPhase::Current);
+                self.abort_request(State::Broken, ImageRequestPhase::Pending);
                 // Step 9.
                 // FIXME(nox): Why are errors silenced here?
                 let _ = task_source.queue(
@@ -843,11 +862,6 @@ impl HTMLImageElement {
                         if src_present || Self::uses_srcset_or_picture(elem) {
                             this.upcast::<EventTarget>().fire_event(atom!("error"));
                         }
-                        // FIXME(nox): According to the spec, setting the current
-                        // request to the broken state is done prior to queuing a
-                        // task, why is this here?
-                        this.abort_request(State::Broken, ImageRequestPhase::Current);
-                        this.abort_request(State::Broken, ImageRequestPhase::Pending);
                     }),
                     window.upcast(),
                 );
@@ -864,6 +878,8 @@ impl HTMLImageElement {
                 self.prepare_image_request(&url, &src, pixel_density);
             },
             Err(_) => {
+                self.abort_request(State::Broken, ImageRequestPhase::Current);
+                self.abort_request(State::Broken, ImageRequestPhase::Pending);
                 // Step 12.1-12.5.
                 let src = src.0;
                 // FIXME(nox): Why are errors silenced here?
@@ -877,11 +893,6 @@ impl HTMLImageElement {
                         }
                         this.upcast::<EventTarget>().fire_event(atom!("error"));
 
-                        // FIXME(nox): According to the spec, setting the current
-                        // request to the broken state is done prior to queuing a
-                        // task, why is this here?
-                        this.abort_request(State::Broken, ImageRequestPhase::Current);
-                        this.abort_request(State::Broken, ImageRequestPhase::Pending);
                     }),
                     window.upcast(),
                 );
@@ -1299,8 +1310,8 @@ impl HTMLImageElement {
             .filter_map(DomRoot::downcast::<HTMLMapElement>)
             .find(|n| {
                 n.upcast::<Element>()
-                    .get_string_attribute(&LocalName::from("name")) ==
-                    last
+                    .get_name()
+                    .map_or(false, |n| *n == *last)
             });
 
         useMapElements.map(|mapElem| mapElem.get_area_elements())
@@ -1635,7 +1646,6 @@ impl VirtualMethods for HTMLImageElement {
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &local_name!("name") => AttrValue::from_atomic(value.into()),
             &local_name!("width") | &local_name!("height") => {
                 AttrValue::from_dimension(value.into())
             },

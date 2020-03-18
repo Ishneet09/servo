@@ -12,71 +12,30 @@ use style::values::generics::length::MaxSize;
 use style::Zero;
 use style_traits::CSSPixel;
 
-pub type Point<U> = euclid::Point2D<f32, U>;
-pub type Size<U> = euclid::Size2D<f32, U>;
-pub type Rect<U> = euclid::Rect<f32, U>;
-
-pub(crate) mod physical {
-    #[derive(Clone)]
-    pub(crate) struct Vec2<T> {
-        pub x: T,
-        pub y: T,
-    }
-
-    #[derive(Clone, Debug)]
-    pub(crate) struct Rect<T> {
-        pub top_left: Vec2<T>,
-        pub size: Vec2<T>,
-    }
-
-    #[derive(Clone, Debug)]
-    pub(crate) struct Sides<T> {
-        pub top: T,
-        pub left: T,
-        pub bottom: T,
-        pub right: T,
-    }
-}
+pub type PhysicalPoint<U> = euclid::Point2D<U, CSSPixel>;
+pub type PhysicalSize<U> = euclid::Size2D<U, CSSPixel>;
+pub type PhysicalRect<U> = euclid::Rect<U, CSSPixel>;
+pub type PhysicalSides<U> = euclid::SideOffsets2D<U, CSSPixel>;
 
 pub(crate) mod flow_relative {
-    #[derive(Clone)]
+    #[derive(Clone, Serialize)]
     pub(crate) struct Vec2<T> {
         pub inline: T,
         pub block: T,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Serialize)]
     pub(crate) struct Rect<T> {
         pub start_corner: Vec2<T>,
         pub size: Vec2<T>,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Serialize)]
     pub(crate) struct Sides<T> {
         pub inline_start: T,
         pub inline_end: T,
         pub block_start: T,
         pub block_end: T,
-    }
-}
-
-impl<T: Zero> physical::Vec2<T> {
-    pub fn zero() -> Self {
-        Self {
-            x: T::zero(),
-            y: T::zero(),
-        }
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for physical::Vec2<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Not using f.debug_struct on purpose here, to keep {:?} output somewhat compact
-        f.write_str("Vec2 { x: ")?;
-        self.x.fmt(f)?;
-        f.write_str(", y: ")?;
-        self.y.fmt(f)?;
-        f.write_str(" }")
     }
 }
 
@@ -91,27 +50,13 @@ impl<T: fmt::Debug> fmt::Debug for flow_relative::Vec2<T> {
     }
 }
 
-impl<T> Add<&'_ physical::Vec2<T>> for &'_ physical::Vec2<T>
-where
-    T: Add<Output = T> + Copy,
-{
-    type Output = physical::Vec2<T>;
-
-    fn add(self, other: &'_ physical::Vec2<T>) -> Self::Output {
-        physical::Vec2 {
-            x: self.x + other.x,
-            y: self.y + other.y,
-        }
-    }
-}
-
-impl<T: Clone> physical::Vec2<T> {
-    pub fn size_to_flow_relative(&self, mode: WritingMode) -> flow_relative::Vec2<T> {
+impl<T: Clone> flow_relative::Vec2<T> {
+    pub fn from_physical_size(physical_size: &PhysicalSize<T>, mode: WritingMode) -> Self {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let (i, b) = if mode.is_horizontal() {
-            (&self.x, &self.y)
+            (&physical_size.width, &physical_size.height)
         } else {
-            (&self.y, &self.x)
+            (&physical_size.height, &physical_size.width)
         };
         flow_relative::Vec2 {
             inline: i.clone(),
@@ -223,41 +168,32 @@ impl fmt::Debug for flow_relative::Rect<Length> {
 }
 
 impl<T: Clone> flow_relative::Vec2<T> {
-    pub fn size_to_physical(&self, mode: WritingMode) -> physical::Vec2<T> {
+    pub fn to_physical(&self, mode: WritingMode) -> PhysicalSize<T> {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let (x, y) = if mode.is_horizontal() {
             (&self.inline, &self.block)
         } else {
             (&self.block, &self.inline)
         };
-        physical::Vec2 {
-            x: x.clone(),
-            y: y.clone(),
-        }
+        PhysicalSize::new(x.clone(), y.clone())
     }
 }
 
-impl From<physical::Vec2<Length>> for Point<CSSPixel> {
-    fn from(v: physical::Vec2<Length>) -> Self {
-        Point::from_lengths(v.x.into(), v.y.into())
-    }
-}
-
-impl<T: Clone> physical::Sides<T> {
-    pub fn to_flow_relative(&self, mode: WritingMode) -> flow_relative::Sides<T> {
+impl<T: Clone> flow_relative::Sides<T> {
+    pub fn from_physical(sides: &PhysicalSides<T>, mode: WritingMode) -> Self {
         // https://drafts.csswg.org/css-writing-modes/#logical-to-physical
         let block_flow = mode.block_flow_direction();
         let (bs, be) = match mode.block_flow_direction() {
-            BlockFlowDirection::TopToBottom => (&self.top, &self.bottom),
-            BlockFlowDirection::RightToLeft => (&self.right, &self.left),
-            BlockFlowDirection::LeftToRight => (&self.left, &self.right),
+            BlockFlowDirection::TopToBottom => (&sides.top, &sides.bottom),
+            BlockFlowDirection::RightToLeft => (&sides.right, &sides.left),
+            BlockFlowDirection::LeftToRight => (&sides.left, &sides.right),
         };
         use BlockFlowDirection::TopToBottom;
         let (is, ie) = match (block_flow, mode.inline_base_direction()) {
-            (TopToBottom, InlineBaseDirection::LeftToRight) => (&self.left, &self.right),
-            (TopToBottom, InlineBaseDirection::RightToLeft) => (&self.right, &self.left),
-            (_, InlineBaseDirection::LeftToRight) => (&self.top, &self.bottom),
-            (_, InlineBaseDirection::RightToLeft) => (&self.bottom, &self.top),
+            (TopToBottom, InlineBaseDirection::LeftToRight) => (&sides.left, &sides.right),
+            (TopToBottom, InlineBaseDirection::RightToLeft) => (&sides.right, &sides.left),
+            (_, InlineBaseDirection::LeftToRight) => (&sides.top, &sides.bottom),
+            (_, InlineBaseDirection::RightToLeft) => (&sides.bottom, &sides.top),
         };
         flow_relative::Sides {
             inline_start: is.clone(),
@@ -303,6 +239,44 @@ impl<T> flow_relative::Sides<T> {
         T: Add + Copy,
     {
         self.block_start + self.block_end
+    }
+
+    pub fn to_physical(&self, mode: WritingMode) -> PhysicalSides<T>
+    where
+        T: Clone,
+    {
+        let top;
+        let right;
+        let bottom;
+        let left;
+        if mode.is_vertical() {
+            if mode.is_vertical_lr() {
+                left = self.block_start.clone();
+                right = self.block_end.clone();
+            } else {
+                right = self.block_start.clone();
+                left = self.block_end.clone();
+            }
+
+            if mode.is_inline_tb() {
+                top = self.inline_start.clone();
+                bottom = self.inline_end.clone();
+            } else {
+                bottom = self.inline_start.clone();
+                top = self.inline_end.clone();
+            }
+        } else {
+            top = self.block_start.clone();
+            bottom = self.block_end.clone();
+            if mode.is_bidi_ltr() {
+                left = self.inline_start.clone();
+                right = self.inline_end.clone();
+            } else {
+                right = self.inline_start.clone();
+                left = self.inline_end.clone();
+            }
+        }
+        PhysicalSides::new(top, right, bottom, left)
     }
 }
 
@@ -364,8 +338,8 @@ impl<T> flow_relative::Rect<T> {
         // Will be needed for other writing modes
         // FIXME: what if the containing block has a different mode?
         // https://drafts.csswg.org/css-writing-modes/#orthogonal-flows
-        _containing_block: &physical::Rect<T>,
-    ) -> physical::Rect<T>
+        _containing_block: &PhysicalRect<T>,
+    ) -> PhysicalRect<T>
     where
         T: Clone,
     {
@@ -374,69 +348,9 @@ impl<T> flow_relative::Rect<T> {
             PhysicalCorner::TopLeft => (&self.start_corner.inline, &self.start_corner.block),
             _ => unimplemented!(),
         };
-        physical::Rect {
-            top_left: physical::Vec2 {
-                x: tl_x.clone(),
-                y: tl_y.clone(),
-            },
-            size: self.size.size_to_physical(mode),
-        }
-    }
-}
-
-impl<T> physical::Rect<T> {
-    pub fn translate(&self, by: &physical::Vec2<T>) -> Self
-    where
-        T: Add<Output = T> + Copy,
-    {
-        physical::Rect {
-            top_left: &self.top_left + by,
-            size: self.size.clone(),
-        }
-    }
-}
-
-impl physical::Rect<Length> {
-    pub fn axis_aligned_bounding_box(&self, other: &Self) -> Self {
-        let top_left = physical::Vec2 {
-            x: self.top_left.x.min(other.top_left.x),
-            y: self.top_left.y.min(other.top_left.y),
-        };
-
-        let bottom_corner_x = (self.top_left.x + self.size.x).max(other.top_left.x + other.size.x);
-        let bottom_corner_y = (self.top_left.y + self.size.y).max(other.top_left.y + other.size.y);
-        let size = physical::Vec2 {
-            x: bottom_corner_x - top_left.x,
-            y: bottom_corner_y - top_left.y,
-        };
-
-        Self { top_left, size }
-    }
-}
-
-impl<T: Zero> physical::Rect<T> {
-    pub fn zero() -> Self {
-        Self {
-            top_left: physical::Vec2::zero(),
-            size: physical::Vec2::zero(),
-        }
-    }
-}
-
-impl From<physical::Rect<Length>> for Rect<CSSPixel> {
-    fn from(r: physical::Rect<Length>) -> Self {
-        Rect {
-            origin: Point::new(r.top_left.x.px(), r.top_left.y.px()),
-            size: Size::new(r.size.x.px(), r.size.y.px()),
-        }
-    }
-}
-
-impl From<physical::Rect<Length>> for webrender_api::units::LayoutRect {
-    fn from(r: physical::Rect<Length>) -> Self {
-        Rect {
-            origin: Point::new(r.top_left.x.px(), r.top_left.y.px()),
-            size: Size::new(r.size.x.px(), r.size.y.px()),
-        }
+        PhysicalRect::new(
+            PhysicalPoint::new(tl_x.clone(), tl_y.clone()),
+            self.size.to_physical(mode),
+        )
     }
 }

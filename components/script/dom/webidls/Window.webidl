@@ -55,8 +55,8 @@
   // user prompts
   void alert(DOMString message);
   void alert();
-  //boolean confirm(optional DOMString message = "");
-  //DOMString? prompt(optional DOMString message = "", optional DOMString default = "");
+  boolean confirm(optional DOMString message = "");
+  DOMString? prompt(optional DOMString message = "", optional DOMString default = "");
   //void print();
   //any showModalDialog(DOMString url, optional any argument);
 
@@ -174,6 +174,12 @@ partial interface Window {
    [Pref="css.animations.testing.enabled"]
    readonly attribute unsigned long runningAnimationCount;
 };
+
+// https://w3c.github.io/selection-api/#dom-document
+partial interface Window {
+   Selection? getSelection();
+};
+
 
 dictionary WindowPostMessageOptions : PostMessageOptions {
    USVString targetOrigin = "/";

@@ -841,7 +841,6 @@ install them, let us know by filing a bug!")
                 action='store_true',
                 help='Build with frame pointer enabled, used by the background hang monitor.',
             ),
-            CommandArgument('--with-raqote', default=None, action='store_true'),
             CommandArgument('--with-layout-2020', default=None, action='store_true'),
             CommandArgument('--with-layout-2013', default=None, action='store_true'),
             CommandArgument('--without-wgl', default=None, action='store_true'),
@@ -882,7 +881,7 @@ install them, let us know by filing a bug!")
         env=None, verbose=False,
         target=None, android=False, magicleap=False, libsimpleservo=False,
         features=None, debug_mozjs=False, with_debug_assertions=False,
-        with_frame_pointer=False, with_raqote=False, without_wgl=False,
+        with_frame_pointer=False, without_wgl=False,
         with_layout_2020=False, with_layout_2013=False,
         uwp=False, media_stack=None,
     ):
@@ -913,16 +912,11 @@ install them, let us know by filing a bug!")
         if not magicleap:
             features.append("native-bluetooth")
         if uwp:
-            features.append("canvas2d-raqote")
             features.append("no-wgl")
             features.append("uwp")
         else:
             # Non-UWP builds provide their own libEGL via mozangle.
             features.append("egl")
-        if with_raqote and "canvas2d-azure" not in features:
-            features.append("canvas2d-raqote")
-        elif "canvas2d-azure" not in features:
-            features.append("canvas2d-raqote")
         if with_layout_2020 or (self.config["build"]["layout-2020"] and not with_layout_2013):
             features.append("layout-2020")
         elif "layout-2020" not in features:
@@ -1009,7 +1003,12 @@ install them, let us know by filing a bug!")
             self.ensure_rustup_version()
             toolchain = self.rust_toolchain()
 
-            if toolchain.encode("utf-8") not in check_output(["rustup", "toolchain", "list"]):
+            status = subprocess.call(
+                ["rustup", "run", toolchain.encode("utf-8"), "rustc", "--version"],
+                stdout=open(os.devnull, "wb"),
+                stderr=subprocess.STDOUT,
+            )
+            if status:
                 check_call(["rustup", "toolchain", "install", "--profile", "minimal", toolchain])
 
             installed = check_output(
@@ -1019,7 +1018,7 @@ install them, let us know by filing a bug!")
                 if component.encode("utf-8") not in installed:
                     check_call(["rustup", "component", "add", "--toolchain", toolchain, component])
 
-            if target and "uwp" not in target and target not in check_output(
+            if target and "uwp" not in target and target.encode("utf-8") not in check_output(
                 ["rustup", "target", "list", "--installed", "--toolchain", toolchain]
             ):
                 check_call(["rustup", "target", "add", "--toolchain", toolchain, target])

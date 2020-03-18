@@ -22,6 +22,8 @@ use embedder_traits::EmbedderProxy;
 use hyper_serde::Serde;
 use ipc_channel::ipc::{self, IpcReceiver, IpcReceiverSet, IpcSender};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use net_traits::blob_url_store::parse_blob_url;
+use net_traits::filemanager_thread::FileTokenCheck;
 use net_traits::request::{Destination, RequestBuilder};
 use net_traits::response::{Response, ResponseInit};
 use net_traits::storage_thread::StorageThreadMsg;
@@ -46,6 +48,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
+use std::time::Duration;
 
 /// Returns a tuple of (public, private) senders to the new threads.
 pub fn new_resource_threads(
@@ -291,6 +294,7 @@ impl ResourceChannelManager {
             },
             CoreResourceMsg::GetCookiesForUrl(url, consumer, source) => {
                 let mut cookie_jar = http_state.cookie_jar.write().unwrap();
+                cookie_jar.remove_expired_cookies_for_url(&url);
                 consumer
                     .send(cookie_jar.cookies_for_url(&url, source))
                     .unwrap();
@@ -300,6 +304,7 @@ impl ResourceChannelManager {
             },
             CoreResourceMsg::GetCookiesDataForUrl(url, consumer, source) => {
                 let mut cookie_jar = http_state.cookie_jar.write().unwrap();
+                cookie_jar.remove_expired_cookies_for_url(&url);
                 let cookies = cookie_jar
                     .cookies_data_for_url(&url, source)
                     .map(Serde)
@@ -343,6 +348,7 @@ impl ResourceChannelManager {
                         Err(_) => warn!("Error writing hsts list to disk"),
                     }
                 }
+                self.resource_manager.exit();
                 let _ = sender.send(());
                 return false;
             },
@@ -427,8 +433,133 @@ pub struct CoreResourceManager {
     devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     swmanager_chan: Option<IpcSender<CustomResponseMediator>>,
     filemanager: FileManager,
-    fetch_pool: rayon::ThreadPool,
+    thread_pool: Arc<CoreResourceThreadPool>,
     certificate_path: Option<String>,
+}
+
+/// The state of the thread-pool used by CoreResource.
+struct ThreadPoolState {
+    /// The number of active workers.
+    active_workers: u32,
+    /// Whether the pool can spawn additional work.
+    active: bool,
+}
+
+impl ThreadPoolState {
+    pub fn new() -> ThreadPoolState {
+        ThreadPoolState {
+            active_workers: 0,
+            active: true,
+        }
+    }
+
+    /// Is the pool still able to spawn new work?
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// How many workers are currently active?
+    pub fn active_workers(&self) -> u32 {
+        self.active_workers
+    }
+
+    /// Prevent additional work from being spawned.
+    pub fn switch_to_inactive(&mut self) {
+        self.active = false;
+    }
+
+    /// Add to the count of active workers.
+    pub fn increment_active(&mut self) {
+        self.active_workers += 1;
+    }
+
+    /// Substract from the count of active workers.
+    pub fn decrement_active(&mut self) {
+        self.active_workers -= 1;
+    }
+}
+
+/// Threadpool used by Fetch and file operations.
+pub struct CoreResourceThreadPool {
+    pool: rayon::ThreadPool,
+    state: Arc<Mutex<ThreadPoolState>>,
+}
+
+impl CoreResourceThreadPool {
+    pub fn new(num_threads: usize) -> CoreResourceThreadPool {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        let state = Arc::new(Mutex::new(ThreadPoolState::new()));
+        CoreResourceThreadPool { pool: pool, state }
+    }
+
+    /// Spawn work on the thread-pool, if still active.
+    ///
+    /// There is no need to give feedback to the caller,
+    /// because if we do not perform work,
+    /// it is because the system as a whole is exiting.
+    pub fn spawn<OP>(&self, work: OP)
+    where
+        OP: FnOnce() + Send + 'static,
+    {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.is_active() {
+                state.increment_active();
+            } else {
+                // Don't spawn any work.
+                return;
+            }
+        }
+
+        let state = self.state.clone();
+
+        self.pool.spawn(move || {
+            {
+                let mut state = state.lock().unwrap();
+                if !state.is_active() {
+                    // Decrement number of active workers and return,
+                    // without doing any work.
+                    return state.decrement_active();
+                }
+            }
+            // Perform work.
+            work();
+            {
+                // Decrement number of active workers.
+                let mut state = state.lock().unwrap();
+                state.decrement_active();
+            }
+        });
+    }
+
+    /// Prevent further work from being spawned,
+    /// and wait until all workers are done,
+    /// or a timeout of roughly one second has been reached.
+    pub fn exit(&self) {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.switch_to_inactive();
+        }
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            {
+                let state = self.state.lock().unwrap();
+                let still_active = state.active_workers();
+
+                if still_active == 0 || rounds == 10 {
+                    if still_active > 0 {
+                        debug!("Exiting CoreResourceThreadPool with {:?} still working(should be zero)", still_active);
+                    }
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 impl CoreResourceManager {
@@ -439,18 +570,26 @@ impl CoreResourceManager {
         embedder_proxy: EmbedderProxy,
         certificate_path: Option<String>,
     ) -> CoreResourceManager {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(16)
-            .build()
-            .unwrap();
+        let pool = CoreResourceThreadPool::new(16);
+        let pool_handle = Arc::new(pool);
         CoreResourceManager {
             user_agent: user_agent,
             devtools_chan: devtools_channel,
             swmanager_chan: None,
-            filemanager: FileManager::new(embedder_proxy),
-            fetch_pool: pool,
+            filemanager: FileManager::new(embedder_proxy, Arc::downgrade(&pool_handle)),
+            thread_pool: pool_handle,
             certificate_path,
         }
+    }
+
+    /// Exit the core resource manager.
+    pub fn exit(&mut self) {
+        // Prevents further work from being spawned on the pool,
+        // blocks until all workers in the pool are done,
+        // or a short timeout has been reached.
+        self.thread_pool.exit();
+
+        debug!("Exited CoreResourceManager");
     }
 
     fn set_cookie_for_url(
@@ -484,8 +623,31 @@ impl CoreResourceManager {
             _ => ResourceTimingType::Resource,
         };
 
-        self.fetch_pool.spawn(move || {
-            let mut request = request_builder.build();
+        let mut request = request_builder.build();
+        let url = request.current_url();
+
+        // In the case of a valid blob URL, acquiring a token granting access to a file,
+        // regardless if the URL is revoked after token acquisition.
+        //
+        // TODO: to make more tests pass, acquire this token earlier,
+        // probably in a separate message flow.
+        //
+        // In such a setup, the token would not be acquired here,
+        // but could instead be contained in the actual CoreResourceMsg::Fetch message.
+        //
+        // See https://github.com/servo/servo/issues/25226
+        let (file_token, blob_url_file_id) = match url.scheme() {
+            "blob" => {
+                if let Ok((id, _)) = parse_blob_url(&url) {
+                    (self.filemanager.get_token_for_file(&id), Some(id))
+                } else {
+                    (FileTokenCheck::ShouldFail, None)
+                }
+            },
+            _ => (FileTokenCheck::NotRequired, None),
+        };
+
+        self.thread_pool.spawn(move || {
             // XXXManishearth: Check origin against pipeline id (also ensure that the mode is allowed)
             // todo load context / mimesniff in fetch
             // todo referrer policy?
@@ -495,6 +657,7 @@ impl CoreResourceManager {
                 user_agent: ua,
                 devtools_chan: dc,
                 filemanager: filemanager,
+                file_token,
                 cancellation_listener: Arc::new(Mutex::new(CancellationListener::new(cancel_chan))),
                 timing: ServoArc::new(Mutex::new(ResourceFetchTiming::new(request.timing_type()))),
             };
@@ -514,6 +677,13 @@ impl CoreResourceManager {
                 },
                 None => fetch(&mut request, &mut sender, &context),
             };
+
+            // Remove token after fetch.
+            if let Some(id) = blob_url_file_id.as_ref() {
+                context
+                    .filemanager
+                    .invalidate_token(&context.file_token, id);
+            }
         });
     }
 

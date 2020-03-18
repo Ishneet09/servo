@@ -13,8 +13,8 @@ interface HTMLTextAreaElement : HTMLElement {
   //          attribute boolean autofocus;
   [CEReactions, SetterThrows]
            attribute unsigned long cols;
-  // [CEReactions]
-  //          attribute DOMString dirName;
+  [CEReactions]
+           attribute DOMString dirName;
   [CEReactions]
            attribute boolean disabled;
   readonly attribute HTMLFormElement? form;
@@ -24,6 +24,7 @@ interface HTMLTextAreaElement : HTMLElement {
            attribute long maxLength;
   [CEReactions, SetterThrows]
            attribute long minLength;
+  [CEReactions]
            attribute DOMString name;
   [CEReactions]
            attribute DOMString placeholder;

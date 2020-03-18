@@ -10,8 +10,7 @@ use crate::touch::{TouchAction, TouchHandler};
 use crate::windowing::{
     self, EmbedderCoordinates, MouseWindowEvent, WebRenderDebugOption, WindowMethods,
 };
-use crate::CompositionPipeline;
-use crate::SendableFrameTree;
+use crate::{CompositionPipeline, ConstellationMsg, SendableFrameTree};
 use crossbeam_channel::Sender;
 use embedder_traits::Cursor;
 use euclid::{Point2D, Rect, Scale, Vector2D};
@@ -28,7 +27,7 @@ use num_traits::FromPrimitive;
 use pixels::PixelFormat;
 use profile_traits::time::{self as profile_time, profile, ProfilerCategory};
 use script_traits::CompositorEvent::{MouseButtonEvent, MouseMoveEvent, TouchEvent, WheelEvent};
-use script_traits::{AnimationState, AnimationTickType, ConstellationMsg, LayoutControlMsg};
+use script_traits::{AnimationState, AnimationTickType, LayoutControlMsg};
 use script_traits::{
     MouseButton, MouseEventType, ScrollState, TouchEventType, TouchId, WheelDelta,
 };
@@ -40,6 +39,8 @@ use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use style_traits::viewport::ViewportConstraints;
 use style_traits::{CSSPixel, DevicePixel, PinchZoomFactor};
 use time::{now, precise_time_ns, precise_time_s};
@@ -209,6 +210,11 @@ pub struct IOCompositor<Window: WindowMethods + ?Sized> {
 
     /// True to translate mouse input into touch events.
     convert_mouse_to_touch: bool,
+
+    /// True if a WR frame render has been requested. Screenshots
+    /// taken before the render is complete will not reflect the
+    /// most up to date rendering.
+    waiting_on_pending_frame: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy)]
@@ -323,6 +329,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
             is_running_problem_test,
             exit_after_load,
             convert_mouse_to_touch,
+            waiting_on_pending_frame: state.pending_wr_frame,
         }
     }
 
@@ -426,6 +433,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
             },
 
             (Msg::Recomposite(reason), ShutdownState::NotShuttingDown) => {
+                self.waiting_on_pending_frame.store(false, Ordering::SeqCst);
                 self.composition_request = CompositionRequest::CompositeNow(reason)
             },
 
@@ -456,7 +464,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
                     self.ready_to_save_state,
                     ReadyState::WaitingForConstellationReply
                 );
-                if is_ready {
+                if is_ready && !self.waiting_on_pending_frame.load(Ordering::SeqCst) {
                     self.ready_to_save_state = ReadyState::ReadyToSaveImage;
                     if self.is_running_problem_test {
                         println!("ready to save image!");
@@ -475,9 +483,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
                 ShutdownState::NotShuttingDown,
             ) => {
                 self.pipeline_details(pipeline_id).visible = visible;
-                if visible {
-                    self.process_animations();
-                }
+                self.process_animations();
             },
 
             (Msg::PipelineExited(pipeline_id, sender), _) => {
@@ -1388,7 +1394,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
                                     FramebufferUintLength::new(height),
                                 );
                                 let dynamic_image = DynamicImage::ImageRgb8(img);
-                                if let Err(e) = dynamic_image.write_to(&mut file, ImageFormat::PNG)
+                                if let Err(e) = dynamic_image.write_to(&mut file, ImageFormat::Png)
                                 {
                                     error!("Failed to save {} ({}).", path, e);
                                 }

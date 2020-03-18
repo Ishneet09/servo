@@ -30,6 +30,7 @@ use crate::dom::promise::Promise;
 use crate::dom::promiserejectionevent::PromiseRejectionEvent;
 use crate::dom::response::Response;
 use crate::microtask::{EnqueuedPromiseCallback, Microtask, MicrotaskQueue};
+use crate::realms::{AlreadyInRealm, InRealm};
 use crate::script_module::EnsureModuleHooksInitialized;
 use crate::script_thread::trace_thread;
 use crate::task::TaskBox;
@@ -224,6 +225,7 @@ unsafe extern "C" fn enqueue_promise_job(
 /// https://html.spec.whatwg.org/multipage/#the-hostpromiserejectiontracker-implementation
 unsafe extern "C" fn promise_rejection_tracker(
     cx: *mut RawJSContext,
+    _muted_errors: bool,
     promise: HandleObject,
     state: PromiseRejectionHandlingState,
     _data: *mut c_void,
@@ -232,7 +234,8 @@ unsafe extern "C" fn promise_rejection_tracker(
 
     // Step 3.
     let cx = JSContext::from_ptr(cx);
-    let global = GlobalScope::from_context(*cx);
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(cx);
+    let global = GlobalScope::from_context(*cx, InRealm::Already(&in_realm_proof));
 
     wrap_panic(
         AssertUnwindSafe(|| {
@@ -505,8 +508,16 @@ unsafe fn new_rt_and_cx_with_parent(
 
     // Enable or disable the JITs.
     let cx_opts = &mut *ContextOptionsRef(cx);
-    cx_opts.set_baseline_(pref!(js.baseline.enabled));
-    cx_opts.set_ion_(pref!(js.ion.enabled));
+    JS_SetGlobalJitCompilerOption(
+        cx,
+        JSJitCompilerOption::JSJITCOMPILER_BASELINE_ENABLE,
+        pref!(js.baseline.enabled) as u32,
+    );
+    JS_SetGlobalJitCompilerOption(
+        cx,
+        JSJitCompilerOption::JSJITCOMPILER_ION_ENABLE,
+        pref!(js.ion.enabled) as u32,
+    );
     cx_opts.set_asmJS_(pref!(js.asmjs.enabled));
     let wasm_enabled = pref!(js.wasm.enabled);
     cx_opts.set_wasm_(wasm_enabled);
@@ -521,7 +532,11 @@ unsafe fn new_rt_and_cx_with_parent(
     cx_opts.set_extraWarnings_(pref!(js.strict.enabled));
     // TODO: handle js.strict.debug.enabled
     // TODO: handle js.throw_on_asmjs_validation_failure (needs new Spidermonkey)
-    cx_opts.set_nativeRegExp_(pref!(js.native_regex.enabled));
+    JS_SetGlobalJitCompilerOption(
+        cx,
+        JSJitCompilerOption::JSJITCOMPILER_NATIVE_REGEXP_ENABLE,
+        pref!(js.native_regex.enabled) as u32,
+    );
     JS_SetParallelParsingEnabled(cx, pref!(js.parallel_parsing.enabled));
     JS_SetOffthreadIonCompilationEnabled(cx, pref!(js.offthread_compilation.enabled));
     JS_SetGlobalJitCompilerOption(
@@ -550,11 +565,6 @@ unsafe fn new_rt_and_cx_with_parent(
     // TODO: handle js.shared_memory.enabled
     JS_SetGCParameter(
         cx,
-        JSGCParamKey::JSGC_MAX_MALLOC_BYTES,
-        (pref!(js.mem.high_water_mark) * 1024 * 1024) as u32,
-    );
-    JS_SetGCParameter(
-        cx,
         JSGCParamKey::JSGC_MAX_BYTES,
         in_range(pref!(js.mem.max), 1, 0x100)
             .map(|val| (val * 1024 * 1024) as u32)
@@ -570,7 +580,7 @@ unsafe fn new_rt_and_cx_with_parent(
     };
     JS_SetGCParameter(cx, JSGCParamKey::JSGC_MODE, js_gc_mode as u32);
     if let Some(val) = in_range(pref!(js.mem.gc.incremental.slice_ms), 0, 100_000) {
-        JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET, val as u32);
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, val as u32);
     }
     JS_SetGCParameter(
         cx,
@@ -615,22 +625,14 @@ unsafe fn new_rt_and_cx_with_parent(
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_HIGH_FREQUENCY_HIGH_LIMIT, val as u32);
     }
     if let Some(val) = in_range(pref!(js.mem.gc.allocation_threshold_factor), 0, 10_000) {
-        JS_SetGCParameter(
-            cx,
-            JSGCParamKey::JSGC_ALLOCATION_THRESHOLD_FACTOR,
-            val as u32,
-        );
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_NON_INCREMENTAL_FACTOR, val as u32);
     }
     if let Some(val) = in_range(
         pref!(js.mem.gc.allocation_threshold_avoid_interrupt_factor),
         0,
         10_000,
     ) {
-        JS_SetGCParameter(
-            cx,
-            JSGCParamKey::JSGC_ALLOCATION_THRESHOLD_FACTOR_AVOID_INTERRUPT,
-            val as u32,
-        );
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_AVOID_INTERRUPT_FACTOR, val as u32);
     }
     if let Some(val) = in_range(pref!(js.mem.gc.empty_chunk_count_min), 0, 10_000) {
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_MIN_EMPTY_CHUNK_COUNT, val as u32);
@@ -834,6 +836,7 @@ unsafe fn set_gc_zeal_options(cx: *mut RawJSContext) {
 unsafe fn set_gc_zeal_options(_: *mut RawJSContext) {}
 
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub struct JSContext(*mut RawJSContext);
 
 #[allow(unsafe_code)]
@@ -908,7 +911,8 @@ unsafe extern "C" fn consume_stream(
     _consumer: *mut JSStreamConsumer,
 ) -> bool {
     let cx = JSContext::from_ptr(_cx);
-    let global = GlobalScope::from_context(*cx);
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(cx);
+    let global = GlobalScope::from_context(*cx, InRealm::Already(&in_realm_proof));
 
     //Step 2.1 Upon fulfillment of source, store the Response with value unwrappedSource.
     if let Ok(unwrapped_source) =

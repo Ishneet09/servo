@@ -5,7 +5,10 @@
 use smallvec::SmallVec;
 use webgpu::wgpu::{
     hub::IdentityManager,
-    id::{AdapterId, BindGroupLayoutId, BufferId, DeviceId, PipelineLayoutId},
+    id::{
+        AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandEncoderId, ComputePipelineId,
+        DeviceId, PipelineLayoutId, ShaderModuleId,
+    },
     Backend,
 };
 
@@ -14,8 +17,12 @@ pub struct IdentityHub {
     adapters: IdentityManager,
     devices: IdentityManager,
     buffers: IdentityManager,
+    bind_groups: IdentityManager,
     bind_group_layouts: IdentityManager,
+    compute_pipelines: IdentityManager,
     pipeline_layouts: IdentityManager,
+    shader_modules: IdentityManager,
+    command_encoders: IdentityManager,
     backend: Backend,
 }
 
@@ -25,8 +32,12 @@ impl IdentityHub {
             adapters: IdentityManager::default(),
             devices: IdentityManager::default(),
             buffers: IdentityManager::default(),
+            bind_groups: IdentityManager::default(),
             bind_group_layouts: IdentityManager::default(),
+            compute_pipelines: IdentityManager::default(),
             pipeline_layouts: IdentityManager::default(),
+            shader_modules: IdentityManager::default(),
+            command_encoders: IdentityManager::default(),
             backend,
         }
     }
@@ -43,12 +54,28 @@ impl IdentityHub {
         self.buffers.alloc(self.backend)
     }
 
+    fn create_bind_group_id(&mut self) -> BindGroupId {
+        self.bind_groups.alloc(self.backend)
+    }
+
     fn create_bind_group_layout_id(&mut self) -> BindGroupLayoutId {
         self.bind_group_layouts.alloc(self.backend)
     }
 
+    fn create_compute_pipeline_id(&mut self) -> ComputePipelineId {
+        self.compute_pipelines.alloc(self.backend)
+    }
+
     fn create_pipeline_layout_id(&mut self) -> PipelineLayoutId {
         self.pipeline_layouts.alloc(self.backend)
+    }
+
+    fn create_shader_module_id(&mut self) -> ShaderModuleId {
+        self.shader_modules.alloc(self.backend)
+    }
+
+    pub fn create_command_encoder_id(&mut self) -> CommandEncoderId {
+        self.command_encoders.alloc(self.backend)
     }
 }
 
@@ -82,6 +109,20 @@ impl Identities {
         }
     }
 
+    fn select(&mut self, backend: Backend) -> &mut IdentityHub {
+        match backend {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Backend::Vulkan => &mut self.vk_hub,
+            #[cfg(target_os = "windows")]
+            Backend::Dx12 => &mut self.dx12_hub,
+            #[cfg(target_os = "windows")]
+            Backend::Dx11 => &mut self.dx11_hub,
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            Backend::Metal => &mut self.metal_hub,
+            _ => &mut self.dummy_hub,
+        }
+    }
+
     fn hubs(&mut self) -> Vec<&mut IdentityHub> {
         vec![
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -97,17 +138,7 @@ impl Identities {
     }
 
     pub fn create_device_id(&mut self, backend: Backend) -> DeviceId {
-        match backend {
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Backend::Vulkan => self.vk_hub.create_device_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx12 => self.dx12_hub.create_device_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx11 => self.dx11_hub.create_device_id(),
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
-            Backend::Metal => self.metal_hub.create_device_id(),
-            _ => self.dummy_hub.create_device_id(),
-        }
+        self.select(backend).create_device_id()
     }
 
     pub fn create_adapter_ids(&mut self) -> SmallVec<[AdapterId; 4]> {
@@ -119,44 +150,30 @@ impl Identities {
     }
 
     pub fn create_buffer_id(&mut self, backend: Backend) -> BufferId {
-        match backend {
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Backend::Vulkan => self.vk_hub.create_buffer_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx12 => self.dx12_hub.create_buffer_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx11 => self.dx11_hub.create_buffer_id(),
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
-            Backend::Metal => self.metal_hub.create_buffer_id(),
-            _ => self.dummy_hub.create_buffer_id(),
-        }
+        self.select(backend).create_buffer_id()
+    }
+
+    pub fn create_bind_group_id(&mut self, backend: Backend) -> BindGroupId {
+        self.select(backend).create_bind_group_id()
     }
 
     pub fn create_bind_group_layout_id(&mut self, backend: Backend) -> BindGroupLayoutId {
-        match backend {
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Backend::Vulkan => self.vk_hub.create_bind_group_layout_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx12 => self.dx12_hub.create_bind_group_layout_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx11 => self.dx11_hub.create_bind_group_layout_id(),
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
-            Backend::Metal => self.metal_hub.create_bind_group_layout_id(),
-            _ => self.dummy_hub.create_bind_group_layout_id(),
-        }
+        self.select(backend).create_bind_group_layout_id()
+    }
+
+    pub fn create_compute_pipeline_id(&mut self, backend: Backend) -> ComputePipelineId {
+        self.select(backend).create_compute_pipeline_id()
     }
 
     pub fn create_pipeline_layout_id(&mut self, backend: Backend) -> PipelineLayoutId {
-        match backend {
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Backend::Vulkan => self.vk_hub.create_pipeline_layout_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx12 => self.dx12_hub.create_pipeline_layout_id(),
-            #[cfg(target_os = "windows")]
-            Backend::Dx11 => self.dx11_hub.create_pipeline_layout_id(),
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
-            Backend::Metal => self.metal_hub.create_pipeline_layout_id(),
-            _ => self.dummy_hub.create_pipeline_layout_id(),
-        }
+        self.select(backend).create_pipeline_layout_id()
+    }
+
+    pub fn create_shader_module_id(&mut self, backend: Backend) -> ShaderModuleId {
+        self.select(backend).create_shader_module_id()
+    }
+
+    pub fn create_command_encoder_id(&mut self, backend: Backend) -> CommandEncoderId {
+        self.select(backend).create_command_encoder_id()
     }
 }

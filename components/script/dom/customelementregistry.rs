@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::InCompartment;
 use crate::dom::bindings::callback::{CallbackContainer, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::CustomElementRegistryBinding;
@@ -21,6 +20,7 @@ use crate::dom::bindings::error::{
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::settings_stack::is_execution_stack_empty;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::domexception::{DOMErrorName, DOMException};
@@ -31,6 +31,7 @@ use crate::dom::node::{document_from_node, window_from_node, Node, ShadowIncludi
 use crate::dom::promise::Promise;
 use crate::dom::window::Window;
 use crate::microtask::Microtask;
+use crate::realms::{enter_realm, InRealm};
 use crate::script_runtime::JSContext;
 use crate::script_thread::ScriptThread;
 use dom_struct::dom_struct;
@@ -417,20 +418,20 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-customelementregistry-whendefined>
-    fn WhenDefined(&self, name: DOMString, comp: InCompartment) -> Rc<Promise> {
+    fn WhenDefined(&self, name: DOMString, comp: InRealm) -> Rc<Promise> {
         let global_scope = self.window.upcast::<GlobalScope>();
         let name = LocalName::from(&*name);
 
         // Step 1
         if !is_valid_custom_element_name(&name) {
-            let promise = Promise::new_in_current_compartment(&global_scope, comp);
+            let promise = Promise::new_in_current_realm(&global_scope, comp);
             promise.reject_native(&DOMException::new(&global_scope, DOMErrorName::SyntaxError));
             return promise;
         }
 
         // Step 2
         if self.definitions.borrow().contains_key(&name) {
-            let promise = Promise::new_in_current_compartment(&global_scope, comp);
+            let promise = Promise::new_in_current_realm(&global_scope, comp);
             promise.resolve_native(&UndefinedValue());
             return promise;
         }
@@ -440,7 +441,7 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
 
         // Steps 4, 5
         let promise = map.get(&name).cloned().unwrap_or_else(|| {
-            let promise = Promise::new_in_current_compartment(&global_scope, comp);
+            let promise = Promise::new_in_current_realm(&global_scope, comp);
             map.insert(name, promise.clone());
             promise
         });
@@ -535,12 +536,20 @@ impl CustomElementDefinition {
         rooted!(in(*cx) let constructor = ObjectValue(self.constructor.callback()));
         rooted!(in(*cx) let mut element = ptr::null_mut::<JSObject>());
         {
-            // Go into the constructor's compartment
+            // Go into the constructor's realm
             let _ac = JSAutoRealm::new(*cx, self.constructor.callback());
             let args = HandleValueArray::new();
             if unsafe { !Construct1(*cx, constructor.handle(), &args, element.handle_mut()) } {
                 return Err(Error::JSFailed);
             }
+        }
+
+        // https://heycam.github.io/webidl/#construct-a-callback-function
+        // https://html.spec.whatwg.org/multipage/#clean-up-after-running-script
+        if is_execution_stack_empty() {
+            window
+                .upcast::<GlobalScope>()
+                .perform_a_microtask_checkpoint();
         }
 
         rooted!(in(*cx) let element_val = ObjectValue(element.get()));
@@ -586,13 +595,17 @@ impl CustomElementDefinition {
 /// <https://html.spec.whatwg.org/multipage/#concept-upgrade-an-element>
 #[allow(unsafe_code)]
 pub fn upgrade_element(definition: Rc<CustomElementDefinition>, element: &Element) {
-    // Steps 1-2
+    // Step 1
     let state = element.get_custom_element_state();
-    if state == CustomElementState::Custom || state == CustomElementState::Failed {
+    if state != CustomElementState::Undefined && state != CustomElementState::Uncustomized {
         return;
     }
 
-    // Step 3 happens later to save having to undo it in an exception
+    // Step 2
+    element.set_custom_element_definition(Rc::clone(&definition));
+
+    // Step 3
+    element.set_custom_element_state(CustomElementState::Failed);
 
     // Step 4
     for attr in element.attrs().iter() {
@@ -630,19 +643,18 @@ pub fn upgrade_element(definition: Rc<CustomElementDefinition>, element: &Elemen
     // Step 8 exception handling
     if let Err(error) = result {
         // Step 8.exception.1
-        element.set_custom_element_state(CustomElementState::Failed);
+        element.clear_custom_element_definition();
 
-        // Step 8.exception.2 isn't needed since step 3 hasn't happened yet
-
-        // Step 8.exception.3
+        // Step 8.exception.2
         element.clear_reaction_queue();
 
-        // Step 8.exception.4
+        // Step 8.exception.3
         let global = GlobalScope::current().expect("No current global");
         let cx = global.get_cx();
         unsafe {
+            let ar = enter_realm(&*global);
             throw_dom_exception(cx, &global, error);
-            report_pending_exception(*cx, true);
+            report_pending_exception(*cx, true, InRealm::Entered(&ar));
         }
 
         return;
@@ -651,11 +663,7 @@ pub fn upgrade_element(definition: Rc<CustomElementDefinition>, element: &Elemen
     // TODO Step 9: "If element is a form-associated custom element..."
 
     // Step 10
-
     element.set_custom_element_state(CustomElementState::Custom);
-
-    // Step 3
-    element.set_custom_element_definition(definition);
 }
 
 /// <https://html.spec.whatwg.org/multipage/#concept-upgrade-an-element>
@@ -676,7 +684,7 @@ fn run_upgrade_constructor(
     {
         // Step 8.1 TODO when shadow DOM exists
 
-        // Go into the constructor's compartment
+        // Go into the constructor's realm
         let _ac = JSAutoRealm::new(*cx, constructor.callback());
         let args = HandleValueArray::new();
         // Step 8.2
@@ -690,6 +698,15 @@ fn run_upgrade_constructor(
         } {
             return Err(Error::JSFailed);
         }
+
+        // https://heycam.github.io/webidl/#construct-a-callback-function
+        // https://html.spec.whatwg.org/multipage/#clean-up-after-running-script
+        if is_execution_stack_empty() {
+            window
+                .upcast::<GlobalScope>()
+                .perform_a_microtask_checkpoint();
+        }
+
         // Step 8.3
         let mut same = false;
         rooted!(in(*cx) let construct_result_val = ObjectValue(construct_result.get()));
@@ -881,6 +898,10 @@ impl CustomElementReactionStack {
                 }
 
                 let cx = element.global().get_cx();
+                // We might be here during HTML parsing, rather than
+                // during Javscript execution, and so we typically aren't
+                // already in a realm here.
+                let _ac = JSAutoRealm::new(*cx, element.global().reflector().get_jsobject().get());
 
                 let local_name = DOMString::from(&*local_name);
                 rooted!(in(*cx) let mut name_value = UndefinedValue());
@@ -1127,6 +1148,7 @@ fn is_extendable_element_interface(element: &str) -> bool {
         element == "map" ||
         element == "mark" ||
         element == "marquee" ||
+        element == "menu" ||
         element == "meta" ||
         element == "meter" ||
         element == "nav" ||
@@ -1140,6 +1162,7 @@ fn is_extendable_element_interface(element: &str) -> bool {
         element == "output" ||
         element == "p" ||
         element == "param" ||
+        element == "picture" ||
         element == "plaintext" ||
         element == "pre" ||
         element == "progress" ||

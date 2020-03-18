@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::enter_realm;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventSourceBinding::{
     EventSourceInit, EventSourceMethods, Wrap,
@@ -20,6 +19,7 @@ use crate::dom::messageevent::MessageEvent;
 use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::fetch::{create_a_potential_cors_request, FetchCanceller};
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
+use crate::realms::enter_realm;
 use crate::task_source::{TaskSource, TaskSourceName};
 use crate::timers::OneshotTimerCallback;
 use dom_struct::dom_struct;
@@ -32,7 +32,7 @@ use js::conversions::ToJSValConvertible;
 use js::jsval::UndefinedValue;
 use mime::{self, Mime};
 use net_traits::request::{CacheMode, CorsSettings, Destination, RequestBuilder};
-use net_traits::{CoreResourceMsg, FetchChannels, FetchMetadata};
+use net_traits::{CoreResourceMsg, FetchChannels, FetchMetadata, FilteredMetadata};
 use net_traits::{FetchResponseListener, FetchResponseMsg, NetworkError};
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
 use servo_atoms::Atom;
@@ -339,7 +339,12 @@ impl FetchResponseListener for EventSourceContext {
             Ok(fm) => {
                 let meta = match fm {
                     FetchMetadata::Unfiltered(m) => m,
-                    FetchMetadata::Filtered { unsafe_, .. } => unsafe_,
+                    FetchMetadata::Filtered { unsafe_, filtered } => match filtered {
+                        FilteredMetadata::Opaque | FilteredMetadata::OpaqueRedirect => {
+                            return self.fail_the_connection()
+                        },
+                        _ => unsafe_,
+                    },
                 };
                 let mime = match meta.content_type {
                     None => return self.fail_the_connection(),
@@ -352,7 +357,13 @@ impl FetchResponseListener for EventSourceContext {
                 self.announce_the_connection();
             },
             Err(_) => {
-                self.reestablish_the_connection();
+                // The spec advises failing here if reconnecting would be
+                // "futile", with no more specific advice; WPT tests
+                // consider a non-http(s) scheme to be futile.
+                match self.event_source.root().url.scheme() {
+                    "http" | "https" => self.reestablish_the_connection(),
+                    _ => self.fail_the_connection(),
+                }
             },
         }
     }

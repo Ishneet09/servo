@@ -107,8 +107,8 @@ def download(desc, src, writer, start_byte=0):
         resp = urllib.request.urlopen(req, **get_urlopen_kwargs())
 
         fsize = None
-        if resp.info().getheader('Content-Length'):
-            fsize = int(resp.info().getheader('Content-Length').strip()) + start_byte
+        if resp.info().get('Content-Length'):
+            fsize = int(resp.info().get('Content-Length').strip()) + start_byte
 
         recved = start_byte
         chunk_size = 64 * 1024
@@ -186,6 +186,21 @@ class ZipFileWithUnixPermissions(zipfile.ZipFile):
         mode |= (member.external_attr >> 16)
         os.chmod(extracted, mode)
         return extracted
+
+    # For Python 3.x
+    def _extract_member(self, member, targetpath, pwd):
+        if sys.version_info[0] >= 3:
+            if not isinstance(member, zipfile.ZipInfo):
+                member = self.getinfo(member)
+
+            targetpath = super()._extract_member(member, targetpath, pwd)
+
+            attr = member.external_attr >> 16
+            if attr != 0:
+                os.chmod(targetpath, attr)
+            return targetpath
+        else:
+            return super(ZipFileWithUnixPermissions, self)._extract_member(member, targetpath, pwd)
 
 
 def extract(src, dst, movedir=None, remove=True):

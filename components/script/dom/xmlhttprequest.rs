@@ -618,7 +618,7 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
             }
             // Substep 2
             if !self.upload_complete.get() {
-                self.dispatch_upload_progress_event(atom!("loadstart"), Some(0));
+                self.dispatch_upload_progress_event(atom!("loadstart"), Ok(Some(0)));
                 if self.generation_id.get() != gen_id {
                     return Ok(());
                 }
@@ -758,7 +758,12 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
             }
         }
         // Step 3
-        self.ready_state.set(XMLHttpRequestState::Unsent);
+        if self.ready_state.get() == XMLHttpRequestState::Done {
+            self.change_ready_state(XMLHttpRequestState::Unsent);
+            self.response_status.set(Err(()));
+            self.response.borrow_mut().clear();
+            self.response_headers.borrow_mut().clear();
+        }
     }
 
     // https://xhr.spec.whatwg.org/#the-responseurl-attribute
@@ -961,13 +966,15 @@ impl XMLHttpRequest {
     fn change_ready_state(&self, rs: XMLHttpRequestState) {
         assert_ne!(self.ready_state.get(), rs);
         self.ready_state.set(rs);
-        let event = Event::new(
-            &self.global(),
-            atom!("readystatechange"),
-            EventBubbles::DoesNotBubble,
-            EventCancelable::Cancelable,
-        );
-        event.fire(self.upcast());
+        if rs != XMLHttpRequestState::Unsent {
+            let event = Event::new(
+                &self.global(),
+                atom!("readystatechange"),
+                EventBubbles::DoesNotBubble,
+                EventCancelable::Cancelable,
+            );
+            event.fire(self.upcast());
+        }
     }
 
     fn process_headers_available(
@@ -1055,11 +1062,11 @@ impl XMLHttpRequest {
                 self.upload_complete.set(true);
                 // Substeps 2-4
                 if !self.sync.get() {
-                    self.dispatch_upload_progress_event(atom!("progress"), None);
+                    self.dispatch_upload_progress_event(atom!("progress"), Ok(None));
                     return_if_fetch_was_terminated!();
-                    self.dispatch_upload_progress_event(atom!("load"), None);
+                    self.dispatch_upload_progress_event(atom!("load"), Ok(None));
                     return_if_fetch_was_terminated!();
-                    self.dispatch_upload_progress_event(atom!("loadend"), None);
+                    self.dispatch_upload_progress_event(atom!("loadend"), Ok(None));
                     return_if_fetch_was_terminated!();
                 }
                 // Part of step 13, send() (processing response)
@@ -1157,9 +1164,9 @@ impl XMLHttpRequest {
                 let upload_complete = &self.upload_complete;
                 if !upload_complete.get() {
                     upload_complete.set(true);
-                    self.dispatch_upload_progress_event(Atom::from(errormsg), None);
+                    self.dispatch_upload_progress_event(Atom::from(errormsg), Err(()));
                     return_if_fetch_was_terminated!();
-                    self.dispatch_upload_progress_event(atom!("loadend"), None);
+                    self.dispatch_upload_progress_event(atom!("loadend"), Err(()));
                     return_if_fetch_was_terminated!();
                 }
                 self.dispatch_response_progress_event(Atom::from(errormsg));
@@ -1203,11 +1210,19 @@ impl XMLHttpRequest {
         progressevent.upcast::<Event>().fire(target);
     }
 
-    fn dispatch_upload_progress_event(&self, type_: Atom, partial_load: Option<u64>) {
-        // If partial_load is None, loading has completed and we can just use the value from the request body
+    fn dispatch_upload_progress_event(&self, type_: Atom, partial_load: Result<Option<u64>, ()>) {
+        // If partial_load is Ok(None), loading has completed and we can just use the value from the request body
+        // If an error occured, we pass 0 for both loaded and total
 
-        let total = self.request_body_len.get() as u64;
-        self.dispatch_progress_event(true, type_, partial_load.unwrap_or(total), Some(total));
+        let request_body_len = self.request_body_len.get() as u64;
+        let (loaded, total) = match partial_load {
+            Ok(l) => match l {
+                Some(loaded) => (loaded, Some(request_body_len)),
+                None => (request_body_len, Some(request_body_len)),
+            },
+            Err(()) => (0, None),
+        };
+        self.dispatch_progress_event(true, type_, loaded, total);
     }
 
     fn dispatch_response_progress_event(&self, type_: Atom) {

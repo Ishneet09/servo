@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::InCompartment;
 use crate::document_loader::{LoadBlocker, LoadType};
 use crate::dom::attr::Attr;
 use crate::dom::audiotrack::AudioTrack;
@@ -63,6 +62,7 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::fetch::{create_a_potential_cors_request, FetchCanceller};
 use crate::microtask::{Microtask, MicrotaskRunnable};
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
+use crate::realms::InRealm;
 use crate::script_thread::ScriptThread;
 use crate::task_source::TaskSource;
 use dom_struct::dom_struct;
@@ -74,7 +74,7 @@ use html5ever::{LocalName, Prefix};
 use http::header::{self, HeaderMap, HeaderValue};
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use media::{glplayer_channel, GLPlayerMsg, GLPlayerMsgForward};
+use media::{glplayer_channel, GLPlayerMsg, GLPlayerMsgForward, WindowGLContext};
 use net_traits::image::base::Image;
 use net_traits::image_cache::ImageResponse;
 use net_traits::request::{Destination, Referrer};
@@ -96,7 +96,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use time::{self, Duration, Timespec};
 use webrender_api::{ExternalImageData, ExternalImageId, ExternalImageType, TextureTarget};
-use webrender_api::{ImageData, ImageDescriptor, ImageFormat, ImageKey, Transaction};
+use webrender_api::{ImageData, ImageDescriptor, ImageDescriptorFlags, ImageFormat};
+use webrender_api::{ImageKey, Transaction};
 
 #[derive(PartialEq)]
 enum FrameStatus {
@@ -186,8 +187,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
             frame.get_width(),
             frame.get_height(),
             ImageFormat::BGRA8,
-            false,
-            false,
+            ImageDescriptorFlags::empty(),
         );
 
         match self.current_frame {
@@ -373,6 +373,8 @@ pub struct HTMLMediaElement {
     /// the access to the "privileged" document.servoGetMediaControls(id) API by
     /// keeping a whitelist of media controls identifiers.
     media_controls_id: DomRefCell<Option<String>>,
+    #[ignore_malloc_size_of = "Defined in other crates"]
+    player_context: WindowGLContext,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
@@ -437,6 +439,7 @@ impl HTMLMediaElement {
             current_fetch_context: DomRefCell::new(None),
             id: Cell::new(0),
             media_controls_id: DomRefCell::new(None),
+            player_context: document.window().get_player_context(),
         }
     }
 
@@ -1340,9 +1343,7 @@ impl HTMLMediaElement {
 
         let audio_renderer = self.audio_renderer.borrow().as_ref().map(|r| r.clone());
 
-        let pipeline_id = window
-            .pipeline_id()
-            .expect("Cannot create player outside of a pipeline");
+        let pipeline_id = window.pipeline_id();
         let client_context_id =
             ClientContextId::build(pipeline_id.namespace_id.0, pipeline_id.index.0.get());
         let player = ServoMedia::get().unwrap().create_player(
@@ -1969,15 +1970,14 @@ impl HTMLMediaElement {
 
 impl Drop for HTMLMediaElement {
     fn drop(&mut self) {
-        let window = window_from_node(self);
-        window.get_player_context().glplayer_chan.map(|pipeline| {
+        if let Some(ref pipeline) = self.player_context.glplayer_chan {
             if let Err(err) = pipeline
                 .channel()
                 .send(GLPlayerMsg::UnregisterPlayer(self.id.get()))
             {
                 warn!("GLPlayer disappeared!: {:?}", err);
             }
-        });
+        }
 
         self.remove_controls();
     }
@@ -2105,8 +2105,8 @@ impl HTMLMediaElementMethods for HTMLMediaElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-media-play
-    fn Play(&self, comp: InCompartment) -> Rc<Promise> {
-        let promise = Promise::new_in_current_compartment(&self.global(), comp);
+    fn Play(&self, comp: InRealm) -> Rc<Promise> {
+        let promise = Promise::new_in_current_realm(&self.global(), comp);
         // Step 1.
         // FIXME(nox): Reject promise if not allowed to play.
 
@@ -2834,7 +2834,7 @@ impl ResourceTimingListener for HTMLMediaElementFetchListener {
     }
 
     fn resource_timing_global(&self) -> DomRoot<GlobalScope> {
-        (document_from_node(&*self.elem.root()).global())
+        document_from_node(&*self.elem.root()).global()
     }
 }
 

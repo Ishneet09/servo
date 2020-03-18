@@ -5,7 +5,7 @@
 //! Communication with the compositor thread.
 
 use crate::compositor::CompositingReason;
-use crate::SendableFrameTree;
+use crate::{ConstellationMsg, SendableFrameTree};
 use crossbeam_channel::{Receiver, Sender};
 use embedder_traits::EventLoopWaker;
 use euclid::Rect;
@@ -15,8 +15,10 @@ use msg::constellation_msg::{PipelineId, TopLevelBrowsingContextId};
 use net_traits::image::base::Image;
 use profile_traits::mem;
 use profile_traits::time;
-use script_traits::{AnimationState, ConstellationMsg, EventResult, MouseButton, MouseEventType};
+use script_traits::{AnimationState, EventResult, MouseButton, MouseEventType};
 use std::fmt::{Debug, Error, Formatter};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use style_traits::viewport::ViewportConstraints;
 use style_traits::CSSPixel;
 use webrender_api;
@@ -167,4 +169,5 @@ pub struct InitialCompositorState {
     pub webrender_api: webrender_api::RenderApi,
     pub webvr_heartbeats: Vec<Box<dyn WebVRMainThreadHeartbeat>>,
     pub webxr_main_thread: webxr::MainThreadRegistry,
+    pub pending_wr_frame: Arc<AtomicBool>,
 }

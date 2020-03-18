@@ -5,7 +5,6 @@
 //! The script module mod contains common traits and structs
 //! related to `type=module` for script thread or worker threads.
 
-use crate::compartments::{enter_realm, AlreadyInCompartment, InCompartment};
 use crate::document_loader::LoadType;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
@@ -32,29 +31,34 @@ use crate::dom::window::Window;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::network_listener::{self, NetworkListener};
 use crate::network_listener::{PreInvoke, ResourceTimingListener};
+use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
+use crate::script_runtime::JSContext as SafeJSContext;
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
 use encoding_rs::UTF_8;
 use hyper_serde::Serde;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use js::glue::{AppendToAutoObjectVector, CreateAutoObjectVector};
 use js::jsapi::Handle as RawHandle;
 use js::jsapi::HandleObject;
 use js::jsapi::HandleValue as RawHandleValue;
-use js::jsapi::{AutoObjectVector, JSAutoRealm, JSObject, JSString};
-use js::jsapi::{GetModuleResolveHook, JSRuntime, SetModuleResolveHook};
+use js::jsapi::{
+    CompileModule, ExceptionStackBehavior, GetModuleResolveHook, JSRuntime, SetModuleResolveHook,
+};
 use js::jsapi::{GetRequestedModules, SetModuleMetadataHook};
 use js::jsapi::{GetWaitForAllPromise, ModuleEvaluate, ModuleInstantiate, SourceText};
 use js::jsapi::{Heap, JSContext, JS_ClearPendingException, SetModulePrivate};
+use js::jsapi::{JSAutoRealm, JSObject, JSString};
 use js::jsapi::{SetModuleDynamicImportHook, SetScriptPrivateReferenceHooks};
 use js::jsval::{JSVal, PrivateValue, UndefinedValue};
-use js::rust::jsapi_wrapped::{CompileModule, JS_GetArrayLength, JS_GetElement};
 use js::rust::jsapi_wrapped::{GetRequestedModuleSpecifier, JS_GetPendingException};
+use js::rust::jsapi_wrapped::{JS_GetArrayLength, JS_GetElement};
 use js::rust::wrappers::JS_SetPendingException;
 use js::rust::CompileOptionsWrapper;
 use js::rust::IntoHandle;
+use js::rust::RootedObjectVectorWrapper;
 use js::rust::{Handle, HandleValue};
+use mime::Mime;
 use net_traits::request::{CredentialsMode, Destination, ParserMetadata};
 use net_traits::request::{Referrer, RequestBuilder, RequestMode};
 use net_traits::{FetchMetadata, Metadata};
@@ -65,8 +69,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi;
 use std::marker::PhantomData;
-use std::ptr;
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use url::ParseError as UrlParseError;
 
@@ -325,8 +329,8 @@ impl ModuleTree {
             ))),
         );
 
-        let _compartment = enter_realm(&*owner.global());
-        AlreadyInCompartment::assert(&*owner.global());
+        let _realm = enter_realm(&*owner.global());
+        AlreadyInRealm::assert(&*owner.global());
         let _ais = AutoIncumbentScript::new(&*owner.global());
 
         let promise = promise.as_ref().unwrap();
@@ -361,19 +365,19 @@ impl ModuleTree {
 
         let _ac = JSAutoRealm::new(*global.get_cx(), *global.reflector().get_jsobject());
 
-        let compile_options = CompileOptionsWrapper::new(*global.get_cx(), url_cstr.as_ptr(), 1);
-
-        rooted!(in(*global.get_cx()) let mut module_script = ptr::null_mut::<JSObject>());
+        let compile_options =
+            unsafe { CompileOptionsWrapper::new(*global.get_cx(), url_cstr.as_ptr(), 1) };
 
         let mut source = get_source_text(&module);
 
         unsafe {
-            if !CompileModule(
+            rooted!(in(*global.get_cx()) let mut module_script = CompileModule(
                 *global.get_cx(),
                 compile_options.ptr,
                 &mut source,
-                &mut module_script.handle_mut(),
-            ) {
+            ));
+
+            if module_script.is_null() {
                 warn!("fail to compile module script of {}", url);
 
                 rooted!(in(*global.get_cx()) let mut exception = UndefinedValue());
@@ -396,16 +400,16 @@ impl ModuleTree {
                 module_script.get(),
                 &PrivateValue(Box::into_raw(module_script_data) as *const _),
             );
+
+            debug!("module script of {} compile done", url);
+
+            self.resolve_requested_module_specifiers(
+                &global,
+                module_script.handle().into_handle(),
+                url.clone(),
+            )
+            .map(|_| ModuleObject(Heap::boxed(*module_script)))
         }
-
-        debug!("module script of {} compile done", url);
-
-        self.resolve_requested_module_specifiers(
-            &global,
-            module_script.handle().into_handle(),
-            url.clone(),
-        )
-        .map(|_| ModuleObject(Heap::boxed(*module_script)))
     }
 
     #[allow(unsafe_code)]
@@ -473,8 +477,13 @@ impl ModuleTree {
 
         if let Some(exception) = &*module_error {
             unsafe {
-                JS_SetPendingException(*global.get_cx(), exception.handle());
-                report_pending_exception(*global.get_cx(), true);
+                let ar = enter_realm(&*global);
+                JS_SetPendingException(
+                    *global.get_cx(),
+                    exception.handle(),
+                    ExceptionStackBehavior::Capture,
+                );
+                report_pending_exception(*global.get_cx(), true, InRealm::Entered(&ar));
             }
         }
     }
@@ -724,11 +733,11 @@ impl ModuleOwner {
             ))),
         );
 
-        let compartment = enter_realm(&*self.global());
-        let comp = InCompartment::Entered(&compartment);
+        let realm = enter_realm(&*self.global());
+        let comp = InRealm::Entered(&realm);
         let _ais = AutoIncumbentScript::new(&*self.global());
 
-        let promise = Promise::new_in_current_compartment(&self.global(), comp);
+        let promise = Promise::new_in_current_realm(&self.global(), comp);
 
         promise.append_native_handler(&handler);
 
@@ -932,15 +941,20 @@ impl FetchResponseListener for ModuleContext {
             let meta = self.metadata.take().unwrap();
 
             if let Some(content_type) = meta.content_type.map(Serde::into_inner) {
-                let c = content_type.to_string();
-                // The MIME crate includes params (e.g. charset=utf8) in the to_string
-                // https://github.com/hyperium/mime/issues/120
-                if let Some(ty) = c.split(';').next() {
-                    if !SCRIPT_JS_MIMES.contains(&ty) {
-                        return Err(NetworkError::Internal(format!("Invalid MIME type: {}", ty)));
+                if let Ok(content_type) = Mime::from_str(&content_type.to_string()) {
+                    let essence_mime = content_type.essence_str();
+
+                    if !SCRIPT_JS_MIMES.contains(&essence_mime) {
+                        return Err(NetworkError::Internal(format!(
+                            "Invalid MIME type: {}",
+                            essence_mime
+                        )));
                     }
                 } else {
-                    return Err(NetworkError::Internal("Empty MIME type".into()));
+                    return Err(NetworkError::Internal(format!(
+                        "Failed to parse MIME type: {}",
+                        content_type.to_string()
+                    )));
                 }
             } else {
                 return Err(NetworkError::Internal("No MIME type".into()));
@@ -1074,7 +1088,8 @@ unsafe extern "C" fn HostResolveImportedModule(
     reference_private: RawHandleValue,
     specifier: RawHandle<*mut JSString>,
 ) -> *mut JSObject {
-    let global_scope = GlobalScope::from_context(cx);
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    let global_scope = GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof));
 
     // Step 2.
     let mut base_url = global_scope.api_base_url();
@@ -1324,20 +1339,20 @@ fn fetch_module_descendants_and_link(
                 unsafe {
                     let global = owner.global();
 
-                    let _compartment = enter_realm(&*global);
-                    AlreadyInCompartment::assert(&*global);
+                    let _realm = enter_realm(&*global);
+                    AlreadyInRealm::assert(&*global);
                     let _ais = AutoIncumbentScript::new(&*global);
 
-                    let abv = CreateAutoObjectVector(*global.get_cx());
+                    let abv = RootedObjectVectorWrapper::new(*global.get_cx());
 
                     for descendant in descendants {
-                        assert!(AppendToAutoObjectVector(
-                            abv as *mut AutoObjectVector,
-                            descendant.promise_obj().get()
-                        ));
+                        assert!(abv.append(descendant.promise_obj().get()));
                     }
 
-                    rooted!(in(*global.get_cx()) let raw_promise_all = GetWaitForAllPromise(*global.get_cx(), abv));
+                    rooted!(
+                        in(*global.get_cx())
+                        let raw_promise_all = GetWaitForAllPromise(*global.get_cx(), abv.handle())
+                    );
 
                     let promise_all =
                         Promise::new_with_js_promise(raw_promise_all.handle(), global.get_cx());

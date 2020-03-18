@@ -2,23 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::element_data::{LayoutBox, LayoutDataForElement};
-use crate::geom::physical::Vec2;
-use crate::replaced::ReplacedContent;
+use crate::geom::PhysicalSize;
+use crate::replaced::{CanvasInfo, CanvasSource, ReplacedContent};
 use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
 use crate::wrapper::GetRawData;
-use atomic_refcell::{AtomicRefCell, AtomicRefMut};
+use atomic_refcell::AtomicRefMut;
+use html5ever::LocalName;
 use net_traits::image::base::Image as NetImage;
-use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutNode};
+use script_layout_interface::wrapper_traits::{
+    LayoutNode, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
+};
+use script_layout_interface::HTMLCanvasDataSource;
 use servo_arc::Arc as ServoArc;
 use std::marker::PhantomData as marker;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use style::dom::{OpaqueNode, TNode};
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::generics::counters::Content;
+use style::values::generics::counters::ContentItem;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum WhichPseudoElement {
     Before,
     After,
@@ -44,6 +51,7 @@ pub(super) enum NonReplacedContents {
 
 pub(super) enum PseudoElementContentItem {
     Text(String),
+    #[allow(dead_code)]
     Replaced(ReplacedContent),
 }
 
@@ -244,38 +252,78 @@ impl NonReplacedContents {
 }
 
 fn pseudo_element_style<'dom, Node>(
-    _which: WhichPseudoElement,
-    _element: Node,
-    _context: &LayoutContext,
+    which: WhichPseudoElement,
+    element: Node,
+    context: &LayoutContext,
 ) -> Option<ServoArc<ComputedValues>>
 where
     Node: NodeExt<'dom>,
 {
-    // FIXME: run the cascade, then return None for `content: normal` or `content: none`
-    // https://drafts.csswg.org/css2/generate.html#content
-    None
+    match which {
+        WhichPseudoElement::Before => element.to_threadsafe().get_before_pseudo(),
+        WhichPseudoElement::After => element.to_threadsafe().get_after_pseudo(),
+    }
+    .and_then(|pseudo_element| {
+        let style = pseudo_element.style(context.shared_context());
+        if style.ineffective_content_property() {
+            None
+        } else {
+            Some(style)
+        }
+    })
 }
 
+/// https://www.w3.org/TR/CSS2/generate.html#propdef-content
 fn generate_pseudo_element_content<'dom, Node>(
-    _pseudo_element_style: &ComputedValues,
-    _element: Node,
-    _context: &LayoutContext,
+    pseudo_element_style: &ComputedValues,
+    element: Node,
+    context: &LayoutContext,
 ) -> Vec<PseudoElementContentItem>
 where
     Node: NodeExt<'dom>,
 {
-    let _ = PseudoElementContentItem::Text;
-    let _ = PseudoElementContentItem::Replaced;
-    unimplemented!()
+    match &pseudo_element_style.get_counters().content {
+        Content::Items(ref items) => {
+            let mut vec = vec![];
+            for item in items.iter() {
+                match item {
+                    ContentItem::String(s) => {
+                        vec.push(PseudoElementContentItem::Text(s.to_string()));
+                    },
+                    ContentItem::Attr(attr) => {
+                        let element = element
+                            .to_threadsafe()
+                            .as_element()
+                            .expect("Expected an element");
+                        let attr_val = element
+                            .get_attr(&attr.namespace_url, &LocalName::from(&*attr.attribute));
+                        vec.push(PseudoElementContentItem::Text(
+                            attr_val.map_or("".to_string(), |s| s.to_string()),
+                        ));
+                    },
+                    ContentItem::Url(image_url) => {
+                        if let Some(replaced_content) =
+                            ReplacedContent::from_image_url(element, context, image_url)
+                        {
+                            vec.push(PseudoElementContentItem::Replaced(replaced_content));
+                        }
+                    },
+                    _ => (),
+                }
+            }
+            vec
+        },
+        Content::Normal | Content::None => unreachable!(),
+    }
 }
 
 pub struct BoxSlot<'dom> {
-    slot: Option<ServoArc<AtomicRefCell<Option<LayoutBox>>>>,
+    slot: Option<ArcRefCell<Option<LayoutBox>>>,
     marker: marker<&'dom ()>,
 }
 
 impl BoxSlot<'_> {
-    pub(crate) fn new(slot: ServoArc<AtomicRefCell<Option<LayoutBox>>>) -> Self {
+    pub(crate) fn new(slot: ArcRefCell<Option<LayoutBox>>) -> Self {
         *slot.borrow_mut() = None;
         let slot = Some(slot);
         Self { slot, marker }
@@ -307,7 +355,8 @@ pub(crate) trait NodeExt<'dom>: 'dom + Copy + LayoutNode + Send + Sync {
 
     /// Returns the image if it’s loaded, and its size in image pixels
     /// adjusted for `image_density`.
-    fn as_image(self) -> Option<(Option<Arc<NetImage>>, Vec2<f64>)>;
+    fn as_image(self) -> Option<(Option<Arc<NetImage>>, PhysicalSize<f64>)>;
+    fn as_canvas(self) -> Option<(CanvasInfo, PhysicalSize<f64>)>;
     fn first_child(self) -> Option<Self>;
     fn next_sibling(self) -> Option<Self>;
     fn parent_node(self) -> Option<Self>;
@@ -337,7 +386,7 @@ where
         }
     }
 
-    fn as_image(self) -> Option<(Option<Arc<NetImage>>, Vec2<f64>)> {
+    fn as_image(self) -> Option<(Option<Arc<NetImage>>, PhysicalSize<f64>)> {
         let node = self.to_threadsafe();
         let (resource, metadata) = node.image_data()?;
         let (width, height) = resource
@@ -350,11 +399,25 @@ where
             width = width / density;
             height = height / density;
         }
-        let size = Vec2 {
-            x: width,
-            y: height,
+        Some((resource, PhysicalSize::new(width, height)))
+    }
+
+    fn as_canvas(self) -> Option<(CanvasInfo, PhysicalSize<f64>)> {
+        let node = self.to_threadsafe();
+        let canvas_data = node.canvas_data()?;
+        let source = match canvas_data.source {
+            HTMLCanvasDataSource::WebGL(texture_id) => CanvasSource::WebGL(texture_id),
+            HTMLCanvasDataSource::Image(ipc_sender) => {
+                CanvasSource::Image(ipc_sender.map(|renderer| Arc::new(Mutex::new(renderer))))
+            },
         };
-        Some((resource, size))
+        Some((
+            CanvasInfo {
+                source,
+                canvas_id: canvas_data.canvas_id,
+            },
+            PhysicalSize::new(canvas_data.width.into(), canvas_data.height.into()),
+        ))
     }
 
     fn first_child(self) -> Option<Self> {

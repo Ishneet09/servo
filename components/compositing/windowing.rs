@@ -4,6 +4,7 @@
 
 //! Abstract windowing methods. The concrete implementations of these can be found in `platform/`.
 
+use canvas::{SurfaceProviders, WebGlExecutor};
 use embedder_traits::EventLoopWaker;
 use euclid::Scale;
 #[cfg(feature = "gl")]
@@ -20,10 +21,10 @@ use std::rc::Rc;
 use std::time::Duration;
 use style_traits::DevicePixel;
 
+use rust_webvr::VRServiceManager;
 use webrender_api::units::DevicePoint;
 use webrender_api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use webrender_api::ScrollLocation;
-use webvr::VRServiceManager;
 use webvr_traits::WebVRMainThreadHeartbeat;
 
 #[derive(Clone)]
@@ -105,6 +106,8 @@ pub enum WindowEvent {
     /// Sent when the user triggers a media action through the UA exposed media UI
     /// (play, pause, seek, etc.).
     MediaSessionAction(MediaSessionActionType),
+    /// Set browser visibility. A hidden browser will not tick the animations.
+    ChangeBrowserVisibility(TopLevelBrowsingContextId, bool),
 }
 
 impl Debug for WindowEvent {
@@ -136,6 +139,7 @@ impl Debug for WindowEvent {
             WindowEvent::ToggleSamplingProfiler(..) => write!(f, "ToggleSamplingProfiler"),
             WindowEvent::ExitFullScreen(..) => write!(f, "ExitFullScreen"),
             WindowEvent::MediaSessionAction(..) => write!(f, "MediaSessionAction"),
+            WindowEvent::ChangeBrowserVisibility(..) => write!(f, "ChangeBrowserVisibility"),
         }
     }
 }
@@ -181,7 +185,13 @@ pub trait EmbedderMethods {
     }
 
     /// Register services with a WebXR Registry.
-    fn register_webxr(&mut self, _: &mut webxr::MainThreadRegistry) {}
+    fn register_webxr(
+        &mut self,
+        _: &mut webxr::MainThreadRegistry,
+        _: WebGlExecutor,
+        _: SurfaceProviders,
+    ) {
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

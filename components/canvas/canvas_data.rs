@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::canvas_paint_thread::AntialiasMode;
+use crate::raqote_backend::Repetition;
 use canvas_traits::canvas::*;
 use cssparser::RGBA;
 use euclid::default::{Point2D, Rect, Size2D, Transform2D, Vector2D};
@@ -23,6 +24,7 @@ use webrender_api::units::RectExt as RectExt_;
 /// further operations to it in device space. When it's time to
 /// draw the path, we convert it back to userspace and draw it
 /// with the correct transform applied.
+/// TODO: De-abstract now that Azure is removed?
 enum PathState {
     /// Path builder in user-space. If a transform has been applied
     /// but no further path operations have occurred, it is stored
@@ -77,11 +79,10 @@ pub trait Backend {
     );
     fn create_drawtarget(&self, size: Size2D<u64>) -> Box<dyn GenericDrawTarget>;
     fn recreate_paint_state<'a>(&self, state: &CanvasPaintState<'a>) -> CanvasPaintState<'a>;
-    fn size_from_pattern(&self, rect: &Rect<f32>, pattern: &Pattern) -> Option<Size2D<f32>>;
 }
 
-/// A generic PathBuilder that abstracts the interface for
-/// azure's and raqote's PathBuilder.
+/// A generic PathBuilder that abstracts the interface for azure's and raqote's PathBuilder.
+/// TODO: De-abstract now that Azure is removed?
 pub trait GenericPathBuilder {
     fn arc(
         &mut self,
@@ -220,6 +221,7 @@ impl<'a> PathBuilderRef<'a> {
 // TODO(pylbrecht)
 // This defines required methods for DrawTarget of azure and raqote
 // The prototypes are derived from azure's methods.
+// TODO: De-abstract now that Azure is removed?
 pub trait GenericDrawTarget {
     fn clear_rect(&mut self, rect: &Rect<f32>);
     fn copy_surface(
@@ -299,93 +301,57 @@ pub trait GenericDrawTarget {
 
 #[derive(Clone)]
 pub enum ExtendMode {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::ExtendMode),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(()),
 }
 
 pub enum GradientStop {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::AzGradientStop),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::GradientStop),
 }
 
 pub enum GradientStops {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::GradientStops),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(Vec<raqote::GradientStop>),
 }
 
 #[derive(Clone)]
 pub enum Color {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::Color),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::SolidSource),
 }
 
 #[derive(Clone)]
 pub enum CompositionOp {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::CompositionOp),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::BlendMode),
 }
 
 pub enum SurfaceFormat {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::SurfaceFormat),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(()),
 }
 
 #[derive(Clone)]
 pub enum SourceSurface {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::SourceSurface),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(Vec<u8>), // TODO: See if we can avoid the alloc (probably?)
 }
 
 #[derive(Clone)]
 pub enum Path {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::Path),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::Path),
 }
 
 #[derive(Clone)]
 pub enum Pattern<'a> {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::Pattern, PhantomData<&'a ()>),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(crate::raqote_backend::Pattern<'a>),
 }
 
 pub enum DrawSurfaceOptions {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::DrawSurfaceOptions),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(()),
 }
 
 #[derive(Clone)]
 pub enum DrawOptions {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::DrawOptions),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::DrawOptions),
 }
 
 #[derive(Clone)]
 pub enum StrokeOptions<'a> {
-    #[cfg(feature = "canvas2d-azure")]
-    Azure(azure::azure_hl::StrokeOptions<'a>),
-    #[cfg(feature = "canvas2d-raqote")]
     Raqote(raqote::StrokeStyle, PhantomData<&'a ()>),
 }
 
@@ -410,12 +376,6 @@ pub struct CanvasData<'a> {
     pub canvas_id: CanvasId,
 }
 
-#[cfg(feature = "canvas2d-azure")]
-fn create_backend() -> Box<dyn Backend> {
-    Box::new(crate::azure_backend::AzureBackend)
-}
-
-#[cfg(feature = "canvas2d-raqote")]
 fn create_backend() -> Box<dyn Backend> {
     Box::new(crate::raqote_backend::RaqoteBackend)
 }
@@ -510,12 +470,41 @@ impl<'a> CanvasData<'a> {
             return; // Paint nothing if gradient size is zero.
         }
 
-        let draw_rect = Rect::new(
-            rect.origin,
-            self.backend
-                .size_from_pattern(&rect, &self.state.fill_style)
-                .unwrap_or(rect.size),
-        );
+        let draw_rect = match &self.state.fill_style {
+            Pattern::Raqote(pattern) => match pattern {
+                crate::raqote_backend::Pattern::Surface(pattern) => {
+                    let pattern_rect = Rect::new(Point2D::origin(), pattern.size());
+                    let mut draw_rect = rect.intersection(&pattern_rect).unwrap_or(Rect::zero());
+
+                    match pattern.repetition() {
+                        Repetition::NoRepeat => {
+                            draw_rect.size.width =
+                                draw_rect.size.width.min(pattern_rect.size.width);
+                            draw_rect.size.height =
+                                draw_rect.size.height.min(pattern_rect.size.height);
+                        },
+                        Repetition::RepeatX => {
+                            draw_rect.size.width = rect.size.width;
+                            draw_rect.size.height =
+                                draw_rect.size.height.min(pattern_rect.size.height);
+                        },
+                        Repetition::RepeatY => {
+                            draw_rect.size.height = rect.size.height;
+                            draw_rect.size.width =
+                                draw_rect.size.width.min(pattern_rect.size.width);
+                        },
+                        Repetition::Repeat => {
+                            draw_rect = *rect;
+                        },
+                    }
+
+                    draw_rect
+                },
+                crate::raqote_backend::Pattern::Color(..) |
+                crate::raqote_backend::Pattern::LinearGradient(..) |
+                crate::raqote_backend::Pattern::RadialGradient(..) => *rect,
+            },
+        };
 
         if self.need_to_draw_shadow() {
             self.draw_with_shadow(&draw_rect, |new_draw_target: &mut dyn GenericDrawTarget| {
@@ -919,6 +908,10 @@ impl<'a> CanvasData<'a> {
         self.state.stroke_opts.set_miter_limit(limit);
     }
 
+    pub fn get_transform(&self) -> Transform2D<f32> {
+        self.drawtarget.get_transform()
+    }
+
     pub fn set_transform(&mut self, transform: &Transform2D<f32>) {
         // If there is an in-progress path, store the existing transformation required
         // to move between device and user space.
@@ -978,8 +971,7 @@ impl<'a> CanvasData<'a> {
             stride: None,
             format: webrender_api::ImageFormat::BGRA8,
             offset: 0,
-            is_opaque: false,
-            allow_mipmaps: false,
+            flags: webrender_api::ImageDescriptorFlags::empty(),
         };
         let data = self.drawtarget.snapshot_data_owned();
         let data = webrender_api::ImageData::Raw(Arc::new(data));

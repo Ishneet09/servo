@@ -7,16 +7,19 @@ extern crate log;
 
 pub mod gl_glue;
 
-pub use servo::embedder_traits::MediaSessionPlaybackState;
+pub use servo::embedder_traits::{
+    MediaSessionPlaybackState, PermissionPrompt, PermissionRequest, PromptResult,
+};
 pub use servo::script_traits::{MediaSessionActionType, MouseButton};
 
 use getopts::Options;
+use servo::canvas::{SurfaceProviders, WebGlExecutor};
 use servo::compositing::windowing::{
     AnimationState, EmbedderCoordinates, EmbedderMethods, MouseWindowEvent, WindowEvent,
     WindowMethods,
 };
 use servo::embedder_traits::resources::{self, Resource, ResourceReaderMethods};
-use servo::embedder_traits::{EmbedderMsg, MediaSessionEvent};
+use servo::embedder_traits::{EmbedderMsg, MediaSessionEvent, PromptDefinition, PromptOrigin};
 use servo::euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 use servo::keyboard_types::{Key, KeyState, KeyboardEvent};
 use servo::msg::constellation_msg::TraversalDirection;
@@ -92,8 +95,14 @@ pub trait HostTrait {
     /// Will be called before drawing.
     /// Time to make the targetted GL context current.
     fn make_current(&self);
-    /// javascript window.alert()
-    fn on_alert(&self, msg: String);
+    /// Show alert.
+    fn prompt_alert(&self, msg: String, trusted: bool);
+    /// Ask Yes/No question.
+    fn prompt_yes_no(&self, msg: String, trusted: bool) -> PromptResult;
+    /// Ask Ok/Cancel question.
+    fn prompt_ok_cancel(&self, msg: String, trusted: bool) -> PromptResult;
+    /// Ask for string
+    fn prompt_input(&self, msg: String, default: String, trusted: bool) -> Option<String>;
     /// Page starts loading.
     /// "Reload button" should be disabled.
     /// "Stop button" should be enabled.
@@ -137,6 +146,8 @@ pub trait HostTrait {
     fn on_media_session_playback_state_change(&self, state: MediaSessionPlaybackState);
     /// Called when the media session position state is set.
     fn on_media_session_set_position_state(&self, duration: f64, position: f64, playback_rate: f64);
+    /// Called when devtools server is started
+    fn on_devtools_started(&self, port: Result<u16, ()>);
 }
 
 pub struct ServoGlue {
@@ -481,6 +492,17 @@ impl ServoGlue {
         self.process_event(WindowEvent::MediaSessionAction(action))
     }
 
+    pub fn change_visibility(&mut self, visible: bool) -> Result<(), &'static str> {
+        info!("change_visibility");
+        if let Ok(id) = self.get_browser_id() {
+            let event = WindowEvent::ChangeBrowserVisibility(id, visible);
+            self.process_event(event)
+        } else {
+            // Ignore visibility change if no browser has been created yet.
+            Ok(())
+        }
+    }
+
     fn process_event(&mut self, event: WindowEvent) -> Result<(), &'static str> {
         self.events.push(event);
         if !self.batch_mode {
@@ -540,10 +562,27 @@ impl ServoGlue {
                 EmbedderMsg::AllowUnload(sender) => {
                     let _ = sender.send(true);
                 },
-                EmbedderMsg::Alert(message, sender) => {
-                    info!("Alert: {}", message);
-                    self.callbacks.host_callbacks.on_alert(message);
-                    let _ = sender.send(());
+                EmbedderMsg::Prompt(definition, origin) => {
+                    let cb = &self.callbacks.host_callbacks;
+                    let trusted = origin == PromptOrigin::Trusted;
+                    let res = match definition {
+                        PromptDefinition::Alert(message, sender) => {
+                            sender.send(cb.prompt_alert(message, trusted))
+                        },
+                        PromptDefinition::OkCancel(message, sender) => {
+                            sender.send(cb.prompt_ok_cancel(message, trusted))
+                        },
+                        PromptDefinition::YesNo(message, sender) => {
+                            sender.send(cb.prompt_yes_no(message, trusted))
+                        },
+                        PromptDefinition::Input(message, default, sender) => {
+                            sender.send(cb.prompt_input(message, default, trusted))
+                        },
+                    };
+                    if let Err(e) = res {
+                        let reason = format!("Failed to send Prompt response: {}", e);
+                        self.events.push(WindowEvent::SendError(browser_id, reason));
+                    }
                 },
                 EmbedderMsg::AllowOpeningBrowser(response_chan) => {
                     // Note: would be a place to handle pop-ups config.
@@ -581,6 +620,29 @@ impl ServoGlue {
                 EmbedderMsg::Shutdown => {
                     self.callbacks.host_callbacks.on_shutdown_complete();
                 },
+                EmbedderMsg::PromptPermission(prompt, sender) => {
+                    let message = match prompt {
+                        PermissionPrompt::Request(permission_name) => {
+                            format!("Do you want to grant permission for {:?}?", permission_name)
+                        },
+                        PermissionPrompt::Insecure(permission_name) => {
+                            format!(
+                                "The {:?} feature is only safe to use in secure context, but servo can't guarantee\n\
+                                that the current context is secure. Do you want to proceed and grant permission?",
+                                permission_name
+                            )
+                        },
+                    };
+
+                    let result = match self.callbacks.host_callbacks.prompt_yes_no(message, true) {
+                        PromptResult::Primary => PermissionRequest::Granted,
+                        PromptResult::Secondary | PromptResult::Dismissed => {
+                            PermissionRequest::Denied
+                        },
+                    };
+
+                    let _ = sender.send(result);
+                },
                 EmbedderMsg::ShowIME(..) => {
                     self.callbacks.host_callbacks.on_ime_state_changed(true);
                 },
@@ -609,6 +671,9 @@ impl ServoGlue {
                                 position_state.playback_rate,
                             ),
                     };
+                },
+                EmbedderMsg::OnDevtoolsStarted(port) => {
+                    self.callbacks.host_callbacks.on_devtools_started(port);
                 },
                 EmbedderMsg::Status(..) |
                 EmbedderMsg::SelectFiles(..) |
@@ -664,19 +729,52 @@ impl EmbedderMethods for ServoEmbedderCallbacks {
     }
 
     #[cfg(feature = "uwp")]
-    fn register_webxr(&mut self, registry: &mut webxr::MainThreadRegistry) {
+    fn register_webxr(
+        &mut self,
+        registry: &mut webxr::MainThreadRegistry,
+        executor: WebGlExecutor,
+        surface_providers: SurfaceProviders,
+    ) {
         debug!("EmbedderMethods::register_xr");
         assert!(
             self.xr_discovery.is_none(),
             "UWP builds should not be initialized with a WebXR Discovery object"
         );
-        let gl = self.gl.clone();
-        let discovery = webxr::openxr::OpenXrDiscovery::new(gl);
+
+        struct ProviderRegistration(SurfaceProviders);
+        impl webxr::openxr::SurfaceProviderRegistration for ProviderRegistration {
+            fn register(&self, id: webxr_api::SessionId, provider: servo::canvas::SurfaceProvider) {
+                self.0.lock().unwrap().insert(id, provider);
+            }
+            fn clone(&self) -> Box<dyn webxr::openxr::SurfaceProviderRegistration> {
+                Box::new(ProviderRegistration(self.0.clone()))
+            }
+        }
+
+        struct GlThread(WebGlExecutor);
+        impl webxr::openxr::GlThread for GlThread {
+            fn execute(&self, runnable: Box<dyn FnOnce() + Send>) {
+                let _ = self.0.send(runnable);
+            }
+            fn clone(&self) -> Box<dyn webxr::openxr::GlThread> {
+                Box::new(GlThread(self.0.clone()))
+            }
+        }
+
+        let discovery = webxr::openxr::OpenXrDiscovery::new(
+            Box::new(GlThread(executor)),
+            Box::new(ProviderRegistration(surface_providers)),
+        );
         registry.register(discovery);
     }
 
     #[cfg(not(feature = "uwp"))]
-    fn register_webxr(&mut self, registry: &mut webxr::MainThreadRegistry) {
+    fn register_webxr(
+        &mut self,
+        registry: &mut webxr::MainThreadRegistry,
+        _executor: WebGlExecutor,
+        _surface_provider_registration: SurfaceProviders,
+    ) {
         debug!("EmbedderMethods::register_xr");
         if let Some(discovery) = self.xr_discovery.take() {
             registry.register(discovery);

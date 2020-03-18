@@ -70,6 +70,7 @@ impl<'a> Handler for Client<'a> {
         }
 
         let mut cookie_jar = self.http_state.cookie_jar.write().unwrap();
+        cookie_jar.remove_expired_cookies_for_url(self.resource_url);
         if let Some(cookie_list) = cookie_jar.cookies_for_url(self.resource_url, CookieSource::HTTP)
         {
             req.headers_mut()
@@ -91,7 +92,7 @@ impl<'a> Handler for Client<'a> {
         let mut jar = self.http_state.cookie_jar.write().unwrap();
         // TODO(eijebong): Replace thise once typed headers settled on a cookie impl
         for cookie in headers.get_all(header::SET_COOKIE) {
-            if let Ok(s) = cookie.to_str() {
+            if let Ok(s) = std::str::from_utf8(cookie.as_bytes()) {
                 if let Some(cookie) =
                     Cookie::from_cookie_string(s.into(), self.resource_url, CookieSource::HTTP)
                 {
@@ -267,21 +268,31 @@ pub fn init(
                     let dom_action = message.to().expect("Ws dom_action message to deserialize");
                     match dom_action {
                         WebSocketDomAction::SendMessage(MessageData::Text(data)) => {
-                            ws_sender.send(Message::text(data)).unwrap();
+                            if let Err(e) = ws_sender.send(Message::text(data)) {
+                                warn!("Error sending websocket message: {:?}", e);
+                            }
                         },
                         WebSocketDomAction::SendMessage(MessageData::Binary(data)) => {
-                            ws_sender.send(Message::binary(data)).unwrap();
+                            if let Err(e) = ws_sender.send(Message::binary(data)) {
+                                warn!("Error sending websocket message: {:?}", e);
+                            }
                         },
                         WebSocketDomAction::Close(code, reason) => {
                             if !initiated_close.fetch_or(true, Ordering::SeqCst) {
                                 match code {
-                                    Some(code) => ws_sender
-                                        .close_with_reason(
+                                    Some(code) => {
+                                        if let Err(e) = ws_sender.close_with_reason(
                                             code.into(),
                                             reason.unwrap_or("".to_owned()),
-                                        )
-                                        .unwrap(),
-                                    None => ws_sender.close(CloseCode::Status).unwrap(),
+                                        ) {
+                                            warn!("Error closing websocket: {:?}", e);
+                                        }
+                                    },
+                                    None => {
+                                        if let Err(e) = ws_sender.close(CloseCode::Status) {
+                                            warn!("Error closing websocket: {:?}", e);
+                                        }
+                                    },
                                 };
                             }
                         },

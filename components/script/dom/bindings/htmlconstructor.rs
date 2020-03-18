@@ -36,6 +36,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLLabelElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLLegendElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLLinkElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLMapElementBinding;
+use crate::dom::bindings::codegen::Bindings::HTMLMenuElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLMeterElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLModElementBinding;
@@ -46,6 +47,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLOutputElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLParagraphElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLParamElementBinding;
+use crate::dom::bindings::codegen::Bindings::HTMLPictureElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLPreElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLProgressElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLQuoteElementBinding;
@@ -279,6 +281,7 @@ pub fn get_constructor_object_from_local_name(
         local_name!("map") => get_constructor!(HTMLMapElementBinding),
         local_name!("mark") => get_constructor!(HTMLElementBinding),
         local_name!("marquee") => get_constructor!(HTMLElementBinding),
+        local_name!("menu") => get_constructor!(HTMLMenuElementBinding),
         local_name!("meta") => get_constructor!(HTMLMetaElementBinding),
         local_name!("meter") => get_constructor!(HTMLMeterElementBinding),
         local_name!("nav") => get_constructor!(HTMLElementBinding),
@@ -292,6 +295,7 @@ pub fn get_constructor_object_from_local_name(
         local_name!("output") => get_constructor!(HTMLOutputElementBinding),
         local_name!("p") => get_constructor!(HTMLParagraphElementBinding),
         local_name!("param") => get_constructor!(HTMLParamElementBinding),
+        local_name!("picture") => get_constructor!(HTMLPictureElementBinding),
         local_name!("plaintext") => get_constructor!(HTMLPreElementBinding),
         local_name!("pre") => get_constructor!(HTMLPreElementBinding),
         local_name!("progress") => get_constructor!(HTMLProgressElementBinding),

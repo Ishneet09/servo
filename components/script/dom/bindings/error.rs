@@ -14,10 +14,12 @@ use crate::dom::bindings::conversions::{
 use crate::dom::bindings::str::USVString;
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::globalscope::GlobalScope;
+use crate::realms::InRealm;
 use crate::script_runtime::JSContext as SafeJSContext;
 #[cfg(feature = "js_backtrace")]
 use backtrace::Backtrace;
 use js::error::{throw_range_error, throw_type_error};
+use js::jsapi::ExceptionStackBehavior;
 use js::jsapi::JSContext;
 use js::jsapi::JS_ClearPendingException;
 use js::jsapi::JS_IsExceptionPending;
@@ -160,7 +162,7 @@ pub fn throw_dom_exception(cx: SafeJSContext, global: &GlobalScope, result: Erro
         let exception = DOMException::new(global, code);
         rooted!(in(*cx) let mut thrown = UndefinedValue());
         exception.to_jsval(*cx, thrown.handle_mut());
-        JS_SetPendingException(*cx, thrown.handle());
+        JS_SetPendingException(*cx, thrown.handle(), ExceptionStackBehavior::Capture);
     }
 }
 
@@ -231,7 +233,7 @@ impl ErrorInfo {
 ///
 /// The `dispatch_event` argument is temporary and non-standard; passing false
 /// prevents dispatching the `error` event.
-pub unsafe fn report_pending_exception(cx: *mut JSContext, dispatch_event: bool) {
+pub unsafe fn report_pending_exception(cx: *mut JSContext, dispatch_event: bool, realm: InRealm) {
     if !JS_IsExceptionPending(cx) {
         return;
     }
@@ -285,7 +287,7 @@ pub unsafe fn report_pending_exception(cx: *mut JSContext, dispatch_event: bool)
     }
 
     if dispatch_event {
-        GlobalScope::from_context(cx).report_an_error(error_info, value.handle());
+        GlobalScope::from_context(cx, realm).report_an_error(error_info, value.handle());
     }
 }
 

@@ -28,11 +28,10 @@ rand = [
 # Ignored packages with duplicated versions
 packages = [
   "arrayvec",
+  "base64",
   "cgl",
   "cocoa",
   "gleam",
-  "mach",
-  "nix",
   "peek-poke",
   "peek-poke-derive",
   "wayland-sys",
@@ -40,16 +39,12 @@ packages = [
   # https://github.com/servo/servo/pull/23288#issuecomment-494687746
   "gl_generator",
 
-  # Just needs a WR update.
-  "derive_more",
-
   # Lots of crates to update.
   "smallvec",
 
   # https://github.com/servo/servo/issues/24421
   "proc-macro2",
   "quote",
-  "syn",
   "unicode-xid",
 
   # These can be removed once servo is updated to surfman 0.2
@@ -63,7 +58,6 @@ packages = [
   "core-text",
   "dirs",
   "lyon_geom",
-  "rand_core",
 ]
 # Files that are ignored for all tidy and lint checks.
 files = [

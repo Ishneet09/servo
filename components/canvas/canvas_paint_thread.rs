@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::canvas_data::*;
-use crate::ConstellationCanvasMsg;
 use canvas_traits::canvas::*;
+use canvas_traits::ConstellationCanvasMsg;
 use crossbeam_channel::{select, unbounded, Sender};
 use euclid::default::Size2D;
 use ipc_channel::ipc::{self, IpcSender};
@@ -87,6 +87,7 @@ impl<'a> CanvasPaintThread<'a> {
                                 Ok(ConstellationCanvasMsg::Exit) => break,
                                 Err(e) => {
                                     warn!("Error on CanvasPaintThread receive ({})", e);
+                                    break;
                                 },
                             }
                         }
@@ -121,16 +122,29 @@ impl<'a> CanvasPaintThread<'a> {
 
     fn process_canvas_2d_message(&mut self, message: Canvas2dMsg, canvas_id: CanvasId) {
         match message {
-            Canvas2dMsg::FillText(text, x, y, max_width) => {
-                self.canvas(canvas_id).fill_text(text, x, y, max_width)
+            Canvas2dMsg::FillText(text, x, y, max_width, style) => {
+                self.canvas(canvas_id).set_fill_style(style);
+                self.canvas(canvas_id).fill_text(text, x, y, max_width);
             },
-            Canvas2dMsg::FillRect(ref rect) => self.canvas(canvas_id).fill_rect(rect),
-            Canvas2dMsg::StrokeRect(ref rect) => self.canvas(canvas_id).stroke_rect(rect),
+            Canvas2dMsg::FillRect(rect, style) => {
+                self.canvas(canvas_id).set_fill_style(style);
+                self.canvas(canvas_id).fill_rect(&rect);
+            },
+            Canvas2dMsg::StrokeRect(rect, style) => {
+                self.canvas(canvas_id).set_stroke_style(style);
+                self.canvas(canvas_id).stroke_rect(&rect);
+            },
             Canvas2dMsg::ClearRect(ref rect) => self.canvas(canvas_id).clear_rect(rect),
             Canvas2dMsg::BeginPath => self.canvas(canvas_id).begin_path(),
             Canvas2dMsg::ClosePath => self.canvas(canvas_id).close_path(),
-            Canvas2dMsg::Fill => self.canvas(canvas_id).fill(),
-            Canvas2dMsg::Stroke => self.canvas(canvas_id).stroke(),
+            Canvas2dMsg::Fill(style) => {
+                self.canvas(canvas_id).set_fill_style(style);
+                self.canvas(canvas_id).fill();
+            },
+            Canvas2dMsg::Stroke(style) => {
+                self.canvas(canvas_id).set_stroke_style(style);
+                self.canvas(canvas_id).stroke();
+            },
             Canvas2dMsg::Clip => self.canvas(canvas_id).clip(),
             Canvas2dMsg::IsPointInPath(x, y, fill_rule, chan) => self
                 .canvas(canvas_id)
@@ -192,12 +206,14 @@ impl<'a> CanvasPaintThread<'a> {
                 .ellipse(center, radius_x, radius_y, rotation, start, end, ccw),
             Canvas2dMsg::RestoreContext => self.canvas(canvas_id).restore_context_state(),
             Canvas2dMsg::SaveContext => self.canvas(canvas_id).save_context_state(),
-            Canvas2dMsg::SetFillStyle(style) => self.canvas(canvas_id).set_fill_style(style),
-            Canvas2dMsg::SetStrokeStyle(style) => self.canvas(canvas_id).set_stroke_style(style),
             Canvas2dMsg::SetLineWidth(width) => self.canvas(canvas_id).set_line_width(width),
             Canvas2dMsg::SetLineCap(cap) => self.canvas(canvas_id).set_line_cap(cap),
             Canvas2dMsg::SetLineJoin(join) => self.canvas(canvas_id).set_line_join(join),
             Canvas2dMsg::SetMiterLimit(limit) => self.canvas(canvas_id).set_miter_limit(limit),
+            Canvas2dMsg::GetTransform(sender) => {
+                let transform = self.canvas(canvas_id).get_transform();
+                sender.send(transform).unwrap();
+            },
             Canvas2dMsg::SetTransform(ref matrix) => self.canvas(canvas_id).set_transform(matrix),
             Canvas2dMsg::SetGlobalAlpha(alpha) => self.canvas(canvas_id).set_global_alpha(alpha),
             Canvas2dMsg::SetGlobalComposition(op) => {

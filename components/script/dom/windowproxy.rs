@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::enter_realm;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::conversions::{root_from_handleobject, ToJSValConvertible};
 use crate::dom::bindings::error::{throw_dom_exception, Error};
@@ -18,6 +17,7 @@ use crate::dom::document::Document;
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
+use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::script_thread::ScriptThread;
 use dom_struct::dom_struct;
@@ -81,7 +81,8 @@ pub struct WindowProxy {
     /// In the case that this is a top-level window, this is our id.
     top_level_browsing_context_id: TopLevelBrowsingContextId,
 
-    /// The name of the browsing context
+    /// The name of the browsing context (sometimes, but not always,
+    /// equal to the name of a container element)
     name: DomRefCell<DOMString>,
     /// The pipeline id of the currently active document.
     /// May be None, when the currently active document is in another script thread.
@@ -165,7 +166,7 @@ impl WindowProxy {
 
             // Create a new browsing context.
             let current = Some(window.global().pipeline_id());
-            let mut window_proxy = Box::new(WindowProxy::new_inherited(
+            let window_proxy = Box::new(WindowProxy::new_inherited(
                 browsing_context_id,
                 top_level_browsing_context_id,
                 current,
@@ -211,7 +212,7 @@ impl WindowProxy {
             let cx = global_to_clone_from.get_cx();
 
             // Create a new browsing context.
-            let mut window_proxy = Box::new(WindowProxy::new_inherited(
+            let window_proxy = Box::new(WindowProxy::new_inherited(
                 browsing_context_id,
                 top_level_browsing_context_id,
                 None,
@@ -369,7 +370,7 @@ impl WindowProxy {
 
     #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-opener
-    pub fn opener(&self, cx: *mut JSContext) -> JSVal {
+    pub fn opener(&self, cx: *mut JSContext, in_realm_proof: InRealm) -> JSVal {
         if self.disowned.get() {
             return NullValue();
         }
@@ -386,7 +387,8 @@ impl WindowProxy {
                     opener_id,
                 ) {
                     Some(opener_top_id) => {
-                        let global_to_clone_from = unsafe { GlobalScope::from_context(cx) };
+                        let global_to_clone_from =
+                            unsafe { GlobalScope::from_context(cx, in_realm_proof) };
                         WindowProxy::new_dissimilar_origin(
                             &*global_to_clone_from,
                             opener_id,
@@ -586,10 +588,10 @@ impl WindowProxy {
 
             // Brain transpant the window proxy.
             // We need to do this, because the Window and WindowProxy
-            // objects need to be in the same compartment.
+            // objects need to be in the same realm.
             // JS_TransplantObject does this by copying the contents
             // of the old window proxy to the new window proxy, then
-            // making the old window proxy a cross-compartment wrapper
+            // making the old window proxy a cross-realm wrapper
             // pointing to the new window proxy.
             rooted!(in(*cx) let new_js_proxy = NewWindowProxy(*cx, window_jsobject, handler));
             debug!(
@@ -981,10 +983,11 @@ pub fn new_window_proxy_handler() -> WindowProxyHandler {
 // defined in the DissimilarOriginWindow IDL.
 
 #[allow(unsafe_code)]
-unsafe fn throw_security_error(cx: *mut JSContext) -> bool {
+unsafe fn throw_security_error(cx: *mut JSContext, realm: InRealm) -> bool {
     if !JS_IsExceptionPending(cx) {
-        let global = GlobalScope::from_context(cx);
-        throw_dom_exception(SafeJSContext::from_ptr(cx), &*global, Error::Security);
+        let safe_context = SafeJSContext::from_ptr(cx);
+        let global = GlobalScope::from_context(cx, realm);
+        throw_dom_exception(safe_context, &*global, Error::Security);
     }
     false
 }
@@ -1005,7 +1008,8 @@ unsafe extern "C" fn has_xorigin(
         *bp = true;
         true
     } else {
-        throw_security_error(cx)
+        let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+        throw_security_error(cx, InRealm::Already(&in_realm_proof))
     }
 }
 
@@ -1031,7 +1035,8 @@ unsafe extern "C" fn set_xorigin(
     _: RawHandleValue,
     _: *mut ObjectOpResult,
 ) -> bool {
-    throw_security_error(cx)
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    throw_security_error(cx, InRealm::Already(&in_realm_proof))
 }
 
 #[allow(unsafe_code)]
@@ -1041,7 +1046,8 @@ unsafe extern "C" fn delete_xorigin(
     _: RawHandleId,
     _: *mut ObjectOpResult,
 ) -> bool {
-    throw_security_error(cx)
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    throw_security_error(cx, InRealm::Already(&in_realm_proof))
 }
 
 #[allow(unsafe_code, non_snake_case)]
@@ -1064,7 +1070,8 @@ unsafe extern "C" fn defineProperty_xorigin(
     _: RawHandle<PropertyDescriptor>,
     _: *mut ObjectOpResult,
 ) -> bool {
-    throw_security_error(cx)
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    throw_security_error(cx, InRealm::Already(&in_realm_proof))
 }
 
 #[allow(unsafe_code, non_snake_case)]
@@ -1073,7 +1080,8 @@ unsafe extern "C" fn preventExtensions_xorigin(
     _: RawHandleObject,
     _: *mut ObjectOpResult,
 ) -> bool {
-    throw_security_error(cx)
+    let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+    throw_security_error(cx, InRealm::Already(&in_realm_proof))
 }
 
 static XORIGIN_PROXY_HANDLER: ProxyTraps = ProxyTraps {

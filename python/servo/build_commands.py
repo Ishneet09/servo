@@ -331,7 +331,7 @@ class MachCommands(CommandBase):
             android_arch = self.config["android"]["arch"]
 
             # Build OpenSSL for android
-            env["OPENSSL_VERSION"] = "1.0.2k"
+            env["OPENSSL_VERSION"] = "1.1.1d"
             make_cmd = ["make"]
             if jobs is not None:
                 make_cmd += ["-j" + jobs]
@@ -580,7 +580,7 @@ class MachCommands(CommandBase):
 
             # The Open SSL configuration
             env.setdefault("OPENSSL_DIR", path.join(target_path, target, "native", "openssl"))
-            env.setdefault("OPENSSL_VERSION", "1.0.2k")
+            env.setdefault("OPENSSL_VERSION", "1.1.1d")
             env.setdefault("OPENSSL_STATIC", "1")
 
             # GStreamer configuration
@@ -784,13 +784,25 @@ class MachCommands(CommandBase):
 
 def angle_root(target, nuget_env):
     arch = {
-
         "aarch64": "arm64",
         "x86_64": "x64",
     }
     angle_arch = arch[target.split('-')[0]]
+
+    package_name = "ANGLE.WindowsStore.Servo"
+
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(os.path.join('support', 'hololens', 'ServoApp', 'packages.config'))
+    root = tree.getroot()
+    for package in root.iter('package'):
+        if package.get('id') == package_name:
+            package_version = package.get('version')
+            break
+    else:
+        raise Exception("Couldn't locate ANGLE package")
+
     angle_default_path = path.join(os.getcwd(), "support", "hololens", "packages",
-                                   "ANGLE.WindowsStore.Servo.2.1.18", "bin", "UAP", angle_arch)
+                                   package_name + "." + package_version, "bin", "UAP", angle_arch)
 
     # Nuget executable command
     nuget_app = path.join(os.getcwd(), "support", "hololens", "ServoApp.sln")
@@ -972,7 +984,7 @@ def package_msvc_dlls(servo_exe_dir, target, vcinstalldir, vs_version):
         if os.path.isdir(redist_dir):
             for p in os.listdir(redist_dir)[::-1]:
                 redist_path = path.join(redist_dir, p)
-                for v in ["VC141", "VC150", "VC160"]:
+                for v in ["VC141", "VC142", "VC150", "VC160"]:
                     # there are two possible paths
                     # `x64\Microsoft.VC*.CRT` or `onecore\x64\Microsoft.VC*.CRT`
                     redist1 = path.join(redist_path, vs_platform, "Microsoft.{}.CRT".format(v))

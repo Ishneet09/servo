@@ -81,7 +81,6 @@ pub struct HTMLIFrameElement {
     sandbox_allowance: Cell<Option<SandboxAllowance>>,
     load_blocker: DomRefCell<Option<LoadBlocker>>,
     visibility: Cell<bool>,
-    name: DomRefCell<DOMString>,
 }
 
 impl HTMLIFrameElement {
@@ -265,7 +264,11 @@ impl HTMLIFrameElement {
         // when the iframe attributes are first processed.
         if mode == ProcessingMode::FirstTime {
             if let Some(window) = self.GetContentWindow() {
-                window.set_name(self.name.borrow().clone())
+                window.set_name(
+                    self.upcast::<Element>()
+                        .get_name()
+                        .map_or(DOMString::from(""), |n| DOMString::from(&*n)),
+                );
             }
         }
 
@@ -287,7 +290,30 @@ impl HTMLIFrameElement {
 
         let url = self.get_url();
 
-        // TODO: check ancestor browsing contexts for same URL
+        // TODO(#25748):
+        // By spec, we return early if there's an ancestor browsing context
+        // "whose active document's url, ignoring fragments, is equal".
+        // However, asking about ancestor browsing contexts is more nuanced than
+        // it sounds and not implemented here.
+        // Within a single origin, we can do it by walking window proxies,
+        // and this check covers only that single-origin case, protecting
+        // against simple typo self-includes but nothing more elaborate.
+        let mut ancestor = window.GetParent();
+        while let Some(a) = ancestor {
+            if let Some(ancestor_url) = a.document().map(|d| d.url()) {
+                if ancestor_url.scheme() == url.scheme() &&
+                    ancestor_url.username() == url.username() &&
+                    ancestor_url.password() == url.password() &&
+                    ancestor_url.host() == url.host() &&
+                    ancestor_url.port() == url.port() &&
+                    ancestor_url.path() == url.path() &&
+                    ancestor_url.query() == url.query()
+                {
+                    return;
+                }
+            }
+            ancestor = a.parent().map(|p| DomRoot::from_ref(p));
+        }
 
         let creator_pipeline_id = if url.as_str() == "about:blank" {
             Some(window.upcast::<GlobalScope>().pipeline_id())
@@ -389,7 +415,6 @@ impl HTMLIFrameElement {
             sandbox_allowance: Cell::new(None),
             load_blocker: DomRefCell::new(None),
             visibility: Cell::new(true),
-            name: DomRefCell::new(DOMString::new()),
         }
     }
 
@@ -569,21 +594,14 @@ impl HTMLIFrameElementMethods for HTMLIFrameElement {
     make_setter!(SetFrameBorder, "frameborder");
 
     // https://html.spec.whatwg.org/multipage/#dom-iframe-name
-    fn SetName(&self, name: DOMString) {
-        *self.name.borrow_mut() = name.clone();
-        if let Some(window) = self.GetContentWindow() {
-            window.set_name(name)
-        }
-    }
+    // A child browsing context checks the name of its iframe only at the time
+    // it is created; subsequent name sets have no special effect.
+    make_atomic_setter!(SetName, "name");
 
     // https://html.spec.whatwg.org/multipage/#dom-iframe-name
-    fn Name(&self) -> DOMString {
-        if let Some(window) = self.GetContentWindow() {
-            window.get_name()
-        } else {
-            self.name.borrow().clone()
-        }
-    }
+    // This is specified as reflecting the name content attribute of the
+    // element, not the name of the child browsing context.
+    make_getter!(Name, "name");
 }
 
 impl VirtualMethods for HTMLIFrameElement {
@@ -641,11 +659,6 @@ impl VirtualMethods for HTMLIFrameElement {
                     debug!("iframe src set while in browsing context.");
                     self.process_the_iframe_attributes(ProcessingMode::NotFirstTime);
                 }
-            },
-            &local_name!("name") => {
-                let new_value = mutation.new_value(attr);
-                let value = new_value.as_ref().map_or("", |v| &v);
-                self.SetName(DOMString::from(value.to_owned()));
             },
             _ => {},
         }

@@ -6,21 +6,33 @@
 
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::GPUAdapterBinding::GPULimits;
+use crate::dom::bindings::codegen::Bindings::GPUBindGroupBinding::GPUBindGroupDescriptor;
 use crate::dom::bindings::codegen::Bindings::GPUBindGroupLayoutBinding::{
     GPUBindGroupLayoutBindings, GPUBindGroupLayoutDescriptor, GPUBindingType,
 };
 use crate::dom::bindings::codegen::Bindings::GPUBufferBinding::GPUBufferDescriptor;
-use crate::dom::bindings::codegen::Bindings::GPUDeviceBinding::{self, GPUDeviceMethods};
+use crate::dom::bindings::codegen::Bindings::GPUComputePipelineBinding::GPUComputePipelineDescriptor;
+use crate::dom::bindings::codegen::Bindings::GPUDeviceBinding::{
+    self, GPUCommandEncoderDescriptor, GPUDeviceMethods,
+};
 use crate::dom::bindings::codegen::Bindings::GPUPipelineLayoutBinding::GPUPipelineLayoutDescriptor;
+use crate::dom::bindings::codegen::Bindings::GPUShaderModuleBinding::GPUShaderModuleDescriptor;
+use crate::dom::bindings::codegen::UnionTypes::Uint32ArrayOrString::{String, Uint32Array};
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::gpuadapter::GPUAdapter;
+use crate::dom::gpubindgroup::GPUBindGroup;
 use crate::dom::gpubindgrouplayout::GPUBindGroupLayout;
 use crate::dom::gpubuffer::{GPUBuffer, GPUBufferState};
+use crate::dom::gpucommandencoder::GPUCommandEncoder;
+use crate::dom::gpucomputepipeline::GPUComputePipeline;
 use crate::dom::gpupipelinelayout::GPUPipelineLayout;
+use crate::dom::gpuqueue::GPUQueue;
+use crate::dom::gpushadermodule::GPUShaderModule;
 use crate::script_runtime::JSContext as SafeJSContext;
 use dom_struct::dom_struct;
 use ipc_channel::ipc;
@@ -29,9 +41,12 @@ use js::jsval::{JSVal, ObjectValue};
 use js::typedarray::{ArrayBuffer, CreateWith};
 use std::collections::{HashMap, HashSet};
 use std::ptr::{self, NonNull};
-use webgpu::wgpu::binding_model::{BindGroupLayoutBinding, BindingType, ShaderStage};
+use webgpu::wgpu::binding_model::{
+    BindGroupBinding, BindGroupLayoutBinding, BindingResource, BindingType, BufferBinding,
+    ShaderStage,
+};
 use webgpu::wgpu::resource::{BufferDescriptor, BufferUsage};
-use webgpu::{WebGPU, WebGPUBuffer, WebGPUDevice, WebGPURequest};
+use webgpu::{WebGPU, WebGPUDevice, WebGPUQueue, WebGPURequest};
 
 #[dom_struct]
 pub struct GPUDevice {
@@ -45,6 +60,7 @@ pub struct GPUDevice {
     limits: Heap<*mut JSObject>,
     label: DomRefCell<Option<DOMString>>,
     device: WebGPUDevice,
+    default_queue: Dom<GPUQueue>,
 }
 
 impl GPUDevice {
@@ -54,6 +70,7 @@ impl GPUDevice {
         extensions: Heap<*mut JSObject>,
         limits: Heap<*mut JSObject>,
         device: WebGPUDevice,
+        queue: &GPUQueue,
     ) -> GPUDevice {
         Self {
             eventtarget: EventTarget::new_inherited(),
@@ -63,6 +80,7 @@ impl GPUDevice {
             limits,
             label: DomRefCell::new(None),
             device,
+            default_queue: Dom::from_ref(queue),
         }
     }
 
@@ -74,10 +92,12 @@ impl GPUDevice {
         extensions: Heap<*mut JSObject>,
         limits: Heap<*mut JSObject>,
         device: WebGPUDevice,
+        queue: WebGPUQueue,
     ) -> DomRoot<GPUDevice> {
+        let queue = GPUQueue::new(global, channel.clone(), queue);
         reflect_dom_object(
             Box::new(GPUDevice::new_inherited(
-                channel, adapter, extensions, limits, device,
+                channel, adapter, extensions, limits, device, &queue,
             )),
             global,
             GPUDeviceBinding::Wrap,
@@ -86,38 +106,6 @@ impl GPUDevice {
 }
 
 impl GPUDevice {
-    unsafe fn resolve_create_buffer_mapped(
-        &self,
-        cx: SafeJSContext,
-        gpu_buffer: WebGPUBuffer,
-        array_buffer: Vec<u8>,
-        descriptor: BufferDescriptor,
-        valid: bool,
-    ) -> Vec<JSVal> {
-        rooted!(in(*cx) let mut js_array_buffer = ptr::null_mut::<JSObject>());
-        let mut out = Vec::new();
-        assert!(ArrayBuffer::create(
-            *cx,
-            CreateWith::Slice(array_buffer.as_slice()),
-            js_array_buffer.handle_mut(),
-        )
-        .is_ok());
-
-        let buff = GPUBuffer::new(
-            &self.global(),
-            self.channel.clone(),
-            gpu_buffer,
-            self.device,
-            GPUBufferState::Mapped,
-            descriptor.size,
-            descriptor.usage.bits(),
-            valid,
-        );
-        out.push(ObjectValue(buff.reflector().get_jsobject().get()));
-        out.push(ObjectValue(js_array_buffer.get()));
-        out
-    }
-
     fn validate_buffer_descriptor(
         &self,
         descriptor: &GPUBufferDescriptor,
@@ -162,6 +150,11 @@ impl GPUDeviceMethods for GPUDevice {
         NonNull::new(self.extensions.get()).unwrap()
     }
 
+    /// https://gpuweb.github.io/gpuweb/#dom-gpudevice-defaultqueue
+    fn DefaultQueue(&self) -> DomRoot<GPUQueue> {
+        DomRoot::from_ref(&self.default_queue)
+    }
+
     /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
     fn GetLabel(&self) -> Option<DOMString> {
         self.label.borrow().clone()
@@ -176,15 +169,18 @@ impl GPUDeviceMethods for GPUDevice {
     fn CreateBuffer(&self, descriptor: &GPUBufferDescriptor) -> DomRoot<GPUBuffer> {
         let (valid, wgpu_descriptor) = self.validate_buffer_descriptor(descriptor);
         let (sender, receiver) = ipc::channel().unwrap();
-        let id = self.global().wgpu_create_buffer_id(self.device.0.backend());
+        let id = self
+            .global()
+            .wgpu_id_hub()
+            .create_buffer_id(self.device.0.backend());
         self.channel
             .0
-            .send(WebGPURequest::CreateBuffer(
+            .send(WebGPURequest::CreateBuffer {
                 sender,
-                self.device,
-                id,
-                wgpu_descriptor,
-            ))
+                device_id: self.device.0,
+                buffer_id: id,
+                descriptor: wgpu_descriptor,
+            })
             .expect("Failed to create WebGPU buffer");
 
         let buffer = receiver.recv().unwrap();
@@ -198,6 +194,7 @@ impl GPUDeviceMethods for GPUDevice {
             descriptor.size,
             descriptor.usage,
             valid,
+            RootedTraceableBox::new(Heap::default()),
         )
     }
 
@@ -209,22 +206,47 @@ impl GPUDeviceMethods for GPUDevice {
     ) -> Vec<JSVal> {
         let (valid, wgpu_descriptor) = self.validate_buffer_descriptor(descriptor);
         let (sender, receiver) = ipc::channel().unwrap();
-        let id = self.global().wgpu_create_buffer_id(self.device.0.backend());
+        let buffer_id = self
+            .global()
+            .wgpu_id_hub()
+            .create_buffer_id(self.device.0.backend());
         self.channel
             .0
-            .send(WebGPURequest::CreateBufferMapped(
+            .send(WebGPURequest::CreateBufferMapped {
                 sender,
-                self.device,
-                id,
-                wgpu_descriptor.clone(),
-            ))
+                device_id: self.device.0,
+                buffer_id,
+                descriptor: wgpu_descriptor.clone(),
+            })
             .expect("Failed to create WebGPU buffer");
 
-        let (buffer, array_buffer) = receiver.recv().unwrap();
-
+        rooted!(in(*cx) let mut js_array_buffer = ptr::null_mut::<JSObject>());
         unsafe {
-            self.resolve_create_buffer_mapped(cx, buffer, array_buffer, wgpu_descriptor, valid)
+            assert!(ArrayBuffer::create(
+                *cx,
+                CreateWith::Length(descriptor.size as u32),
+                js_array_buffer.handle_mut(),
+            )
+            .is_ok());
         }
+
+        let buffer = receiver.recv().unwrap();
+        let buff = GPUBuffer::new(
+            &self.global(),
+            self.channel.clone(),
+            buffer,
+            self.device,
+            GPUBufferState::MappedForWriting,
+            wgpu_descriptor.size,
+            wgpu_descriptor.usage.bits(),
+            valid,
+            RootedTraceableBox::from_box(Heap::boxed(js_array_buffer.get())),
+        );
+
+        vec![
+            ObjectValue(buff.reflector().get_jsobject().get()),
+            ObjectValue(js_array_buffer.get()),
+        ]
     }
 
     /// https://gpuweb.github.io/gpuweb/#GPUDevice-createBindGroupLayout
@@ -369,17 +391,18 @@ impl GPUDeviceMethods for GPUDevice {
             max_dynamic_storage_buffers_per_pipeline_layout >= 0;
 
         let (sender, receiver) = ipc::channel().unwrap();
-        let id = self
+        let bind_group_layout_id = self
             .global()
-            .wgpu_create_bind_group_layout_id(self.device.0.backend());
+            .wgpu_id_hub()
+            .create_bind_group_layout_id(self.device.0.backend());
         self.channel
             .0
-            .send(WebGPURequest::CreateBindGroupLayout(
+            .send(WebGPURequest::CreateBindGroupLayout {
                 sender,
-                self.device,
-                id,
-                bindings.clone(),
-            ))
+                device_id: self.device.0,
+                bind_group_layout_id,
+                bindings: bindings.clone(),
+            })
             .expect("Failed to create WebGPU BindGroupLayout");
 
         let bgl = receiver.recv().unwrap();
@@ -447,20 +470,161 @@ impl GPUDeviceMethods for GPUDevice {
             max_dynamic_storage_buffers_per_pipeline_layout >= 0;
 
         let (sender, receiver) = ipc::channel().unwrap();
-        let id = self
+        let pipeline_layout_id = self
             .global()
-            .wgpu_create_pipeline_layout_id(self.device.0.backend());
+            .wgpu_id_hub()
+            .create_pipeline_layout_id(self.device.0.backend());
         self.channel
             .0
-            .send(WebGPURequest::CreatePipelineLayout(
+            .send(WebGPURequest::CreatePipelineLayout {
                 sender,
-                self.device,
-                id,
-                bgl_ids,
-            ))
+                device_id: self.device.0,
+                pipeline_layout_id,
+                bind_group_layouts: bgl_ids,
+            })
             .expect("Failed to create WebGPU PipelineLayout");
 
         let pipeline_layout = receiver.recv().unwrap();
         GPUPipelineLayout::new(&self.global(), bind_group_layouts, pipeline_layout, valid)
+    }
+
+    /// https://gpuweb.github.io/gpuweb/#dom-gpudevice-createbindgroup
+    fn CreateBindGroup(&self, descriptor: &GPUBindGroupDescriptor) -> DomRoot<GPUBindGroup> {
+        let alignment: u64 = 256;
+        let mut valid = descriptor.layout.bindings().len() == descriptor.bindings.len();
+
+        valid &= descriptor.bindings.iter().all(|bind| {
+            let buffer_size = bind.resource.buffer.size();
+            let resource_size = bind.resource.size.unwrap_or(buffer_size);
+            let length = bind.resource.offset.checked_add(resource_size);
+            let usage = BufferUsage::from_bits(bind.resource.buffer.usage()).unwrap();
+
+            length.is_some() &&
+            buffer_size >= length.unwrap() && // check buffer OOB
+            bind.resource.offset % alignment == 0 && // check alignment
+            bind.resource.offset < buffer_size && // on Vulkan offset must be less than size of buffer
+            descriptor.layout.bindings().iter().any(|layout_bind| {
+                let ty = match layout_bind.type_ {
+                    GPUBindingType::Storage_buffer  => BufferUsage::STORAGE,
+                    // GPUBindingType::Readonly_storage_buffer  => BufferUsage::STORAGE_READ,
+                    GPUBindingType::Uniform_buffer => BufferUsage::UNIFORM,
+                    _ => unimplemented!(),
+                };
+                // binding must be present in layout
+                layout_bind.binding == bind.binding &&
+                // binding must contain one buffer of its type
+                usage.contains(ty)
+            })
+        });
+
+        let bindings = descriptor
+            .bindings
+            .iter()
+            .map(|bind| BindGroupBinding {
+                binding: bind.binding,
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: bind.resource.buffer.id().0,
+                    offset: bind.resource.offset,
+                    size: bind.resource.size.unwrap_or(bind.resource.buffer.size()),
+                }),
+            })
+            .collect::<Vec<_>>();
+        let (sender, receiver) = ipc::channel().unwrap();
+        let bind_group_id = self
+            .global()
+            .wgpu_id_hub()
+            .create_bind_group_id(self.device.0.backend());
+        self.channel
+            .0
+            .send(WebGPURequest::CreateBindGroup {
+                sender,
+                device_id: self.device.0,
+                bind_group_id,
+                bind_group_layout_id: descriptor.layout.id().0,
+                bindings,
+            })
+            .expect("Failed to create WebGPU BindGroup");
+
+        let bind_group = receiver.recv().unwrap();
+        GPUBindGroup::new(&self.global(), bind_group, valid)
+    }
+
+    /// https://gpuweb.github.io/gpuweb/#dom-gpudevice-createshadermodule
+    fn CreateShaderModule(
+        &self,
+        descriptor: RootedTraceableBox<GPUShaderModuleDescriptor>,
+    ) -> DomRoot<GPUShaderModule> {
+        let (sender, receiver) = ipc::channel().unwrap();
+        let program: Vec<u32> = match &descriptor.code {
+            Uint32Array(program) => program.to_vec(),
+            String(program) => program.chars().map(|c| c as u32).collect::<Vec<u32>>(),
+        };
+        let program_id = self
+            .global()
+            .wgpu_id_hub()
+            .create_shader_module_id(self.device.0.backend());
+        self.channel
+            .0
+            .send(WebGPURequest::CreateShaderModule {
+                sender,
+                device_id: self.device.0,
+                program_id,
+                program,
+            })
+            .expect("Failed to create WebGPU ShaderModule");
+
+        let shader_module = receiver.recv().unwrap();
+        GPUShaderModule::new(&self.global(), shader_module)
+    }
+
+    /// https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline
+    fn CreateComputePipeline(
+        &self,
+        descriptor: &GPUComputePipelineDescriptor,
+    ) -> DomRoot<GPUComputePipeline> {
+        let pipeline = descriptor.parent.layout.id();
+        let program = descriptor.computeStage.module.id();
+        let entry_point = descriptor.computeStage.entryPoint.to_string();
+        let compute_pipeline_id = self
+            .global()
+            .wgpu_id_hub()
+            .create_compute_pipeline_id(self.device.0.backend());
+        let (sender, receiver) = ipc::channel().unwrap();
+        self.channel
+            .0
+            .send(WebGPURequest::CreateComputePipeline {
+                sender,
+                device_id: self.device.0,
+                compute_pipeline_id,
+                pipeline_layout_id: pipeline.0,
+                program_id: program.0,
+                entry_point,
+            })
+            .expect("Failed to create WebGPU ComputePipeline");
+
+        let compute_pipeline = receiver.recv().unwrap();
+        GPUComputePipeline::new(&self.global(), compute_pipeline)
+    }
+    /// https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcommandencoder
+    fn CreateCommandEncoder(
+        &self,
+        _descriptor: &GPUCommandEncoderDescriptor,
+    ) -> DomRoot<GPUCommandEncoder> {
+        let (sender, receiver) = ipc::channel().unwrap();
+        let command_encoder_id = self
+            .global()
+            .wgpu_id_hub()
+            .create_command_encoder_id(self.device.0.backend());
+        self.channel
+            .0
+            .send(WebGPURequest::CreateCommandEncoder {
+                sender,
+                device_id: self.device.0,
+                command_encoder_id,
+            })
+            .expect("Failed to create WebGPU command encoder");
+        let encoder = receiver.recv().unwrap();
+
+        GPUCommandEncoder::new(&self.global(), self.channel.clone(), encoder)
     }
 }

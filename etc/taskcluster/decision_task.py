@@ -32,11 +32,6 @@ def tasks(task_for):
     magicleap_nightly = lambda: None
 
     if task_for == "github-push":
-        # FIXME https://github.com/servo/servo/issues/22187
-        # In-emulator testing is disabled for now. (Instead we only compile.)
-        # This local variable shadows the module-level function of the same name.
-        android_x86_wpt = android_x86_release
-
         all_tests = [
             linux_tidy_unit,
             linux_docs_check,
@@ -45,10 +40,6 @@ def tasks(task_for):
             windows_uwp_x64,
             macos_unit,
             magicleap_dev,
-            android_arm32_dev,
-            android_arm32_dev_from_macos,
-            android_arm32_release,
-            android_x86_wpt,
             linux_wpt,
             linux_wpt_layout_2020,
             linux_release,
@@ -75,12 +66,6 @@ def tasks(task_for):
             "try-wpt": [linux_wpt],
             "try-wpt-2020": [linux_wpt_layout_2020],
             "try-wpt-mac": [macos_wpt],
-            "try-wpt-android": [android_x86_wpt],
-            "try-android": [
-                android_arm32_dev,
-                android_arm32_dev_from_macos,
-                android_x86_wpt
-            ],
         }
         for function in by_branch_name.get(branch, []):
             function()
@@ -107,7 +92,6 @@ def tasks(task_for):
         daily_tasks_setup()
         with_rust_nightly()
         linux_nightly()
-        android_nightly()
         windows_nightly()
         macos_nightly()
         update_wpt()
@@ -119,7 +103,6 @@ def tasks(task_for):
 # but should still run when testing this Python code. (See `mock.py`.)
 def mocked_only():
     windows_release()
-    android_x86_wpt()
     magicleap_dev()
     magicleap_nightly()
     decisionlib.DockerWorkerTask("Indexed by task definition").find_or_create()
@@ -313,111 +296,6 @@ def with_rust_nightly():
     )
 
 
-def android_arm32_dev_from_macos():
-    return (
-        macos_build_task("Dev build (macOS)")
-        .with_treeherder("Android ARMv7", "Dev(macOS)")
-        .with_script("""
-            export HOST_CC="$(brew --prefix llvm)/bin/clang"
-            export HOST_CXX="$(brew --prefix llvm)/bin/clang++"
-            ./mach bootstrap-android --accept-all-licences --build
-            ./mach build --android --dev --verbose
-        """)
-        .find_or_create("android_arm32_dev.macos." + CONFIG.task_id())
-    )
-
-
-def android_arm32_dev():
-    return (
-        android_build_task("Dev build")
-        .with_treeherder("Android ARMv7", "Dev")
-        .with_script("""
-            ./mach build --android --dev
-            ./etc/ci/lockfile_changed.sh
-            python ./etc/ci/check_dynamic_symbols.py
-        """)
-        .find_or_create("android_arm32_dev." + CONFIG.task_id())
-    )
-
-
-def android_nightly():
-    return (
-        android_build_task("Nightly build and upload")
-        .with_treeherder("Android", "Nightlies")
-        .with_features("taskclusterProxy")
-        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
-        .with_script("""
-            ./mach build --release --android
-            ./mach package --release --android --maven
-            ./mach build --release --target i686-linux-android
-            ./mach package --release --target i686-linux-android --maven
-            ./mach upload-nightly android --secret-from-taskcluster
-            ./mach upload-nightly maven --secret-from-taskcluster
-        """)
-        .with_artifacts(
-            "/repo/target/android/armv7-linux-androideabi/release/servoapp.apk",
-            "/repo/target/android/armv7-linux-androideabi/release/servoview.aar",
-            "/repo/target/android/i686-linux-android/release/servoapp.apk",
-            "/repo/target/android/i686-linux-android/release/servoview.aar",
-        )
-        .find_or_create("build.android_nightlies." + CONFIG.task_id())
-    )
-
-
-def android_arm32_release():
-    return (
-        android_build_task("Release build")
-        .with_treeherder("Android ARMv7", "Release")
-        .with_script("./mach build --android --release")
-        .with_artifacts(
-            "/repo/target/android/armv7-linux-androideabi/release/servoapp.apk",
-            "/repo/target/android/armv7-linux-androideabi/release/servoview.aar",
-        )
-        .find_or_create("build.android_armv7_release." + CONFIG.task_id())
-    )
-
-
-def android_x86_release():
-    return (
-        android_build_task("Release build")
-        .with_treeherder("Android x86", "Release")
-        .with_script("./mach build --target i686-linux-android --release")
-        .with_artifacts(
-            "/repo/target/android/i686-linux-android/release/servoapp.apk",
-            "/repo/target/android/i686-linux-android/release/servoview.aar",
-        )
-        .find_or_create("build.android_x86_release." + CONFIG.task_id())
-    )
-
-
-def android_x86_wpt():
-    build_task = android_x86_release()
-    task = (
-        linux_task("WPT")
-        .with_treeherder("Android x86", "WPT")
-        .with_provisioner_id("proj-servo")
-        .with_worker_type("docker-worker-kvm")
-        .with_capabilities(privileged=True)
-        .with_scopes("project:servo:docker-worker-kvm:capability:privileged")
-        .with_dockerfile(dockerfile_path("run-android-emulator"))
-        .with_repo_bundle()
-    )
-    apk_dir = "target/android/i686-linux-android/release"
-    return (
-        task
-        .with_script("mkdir -p " + apk_dir)
-        .with_curl_artifact_script(build_task, "servoapp.apk", apk_dir)
-        .with_script("""
-            ./mach bootstrap-android --accept-all-licences --emulator-x86
-            ./mach test-android-startup --release
-            ./mach test-wpt-android --release \
-                /_mozilla/mozilla/DOMParser.html \
-                /_mozilla/mozilla/webgl/context_creation_error.html
-        """)
-        .find_or_create("android_x86_release." + CONFIG.task_id())
-    )
-
-
 def appx_artifact(debug):
     return '/'.join([
         'repo',
@@ -433,6 +311,8 @@ def windows_arm64():
     return (
         windows_build_task("UWP dev build", arch="arm64", package=False)
         .with_treeherder("Windows arm64", "UWP-Dev")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/windows-codesign-cert/latest")
         .with_script(
             "python mach build --dev --target=aarch64-uwp-windows-msvc",
             "python mach package --dev --target aarch64-uwp-windows-msvc --uwp=arm64",
@@ -446,6 +326,8 @@ def windows_uwp_x64():
     return (
         windows_build_task("UWP dev build", package=False)
         .with_treeherder("Windows x64", "UWP-Dev")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/windows-codesign-cert/latest")
         .with_script(
             "python mach build --dev --target=x86_64-uwp-windows-msvc",
             "python mach package --dev --target=x86_64-uwp-windows-msvc --uwp=x64",
@@ -461,7 +343,10 @@ def uwp_nightly():
         windows_build_task("Nightly UWP build and upload", package=False)
         .with_treeherder("Windows x64", "UWP-Nightly")
         .with_features("taskclusterProxy")
-        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
+        .with_scopes(
+            "secrets:get:project/servo/s3-upload-credentials",
+            "secrets:get:project/servo/windows-codesign-cert/latest",
+        )
         .with_script(
             "python mach build --release --target=x86_64-uwp-windows-msvc",
             "python mach build --release --target=aarch64-uwp-windows-msvc",
@@ -484,8 +369,11 @@ def windows_unit(cached=True):
             "mach fetch",
 
             "mach build --dev",
-            "mach test-unit",
-            "mach smoketest --angle",
+
+            # https://github.com/servo/servo/issues/25961
+            #"mach test-unit",
+            #"mach smoketest --angle",
+
             "mach package --dev",
             "mach build --dev --libsimpleservo",
             # The GStreamer plugin currently doesn't support Windows
@@ -658,7 +546,7 @@ def macos_wpt():
     priority = "high" if CONFIG.git_ref == "refs/heads/auto" else None
     build_task = macos_release_build_with_debug_assertions(priority=priority)
     def macos_run_task(name):
-        task = macos_task(name).with_python2() \
+        task = macos_task(name).with_python2().with_python3() \
             .with_repo_bundle(alternate_object_dir="/var/cache/servo.git/objects")
         return with_homebrew(task, ["etc/taskcluster/macos/Brewfile"])
     wpt_chunks(
@@ -676,7 +564,7 @@ def linux_wpt():
 
 
 def linux_wpt_layout_2020():
-    linux_wpt_common(total_chunks=1, layout_2020=True)
+    linux_wpt_common(total_chunks=2, layout_2020=True)
 
 
 def linux_wpt_common(total_chunks, layout_2020):
@@ -734,7 +622,13 @@ def wpt_chunks(platform, make_chunk_task, build_task, total_chunks, processes,
         if this_chunk == 0:
             task.with_script("""
                 ./mach test-wpt-failure
-                time ./mach test-wpt --release --binary-arg=--multiprocess \
+                time python2 ./mach test-wpt --release --binary-arg=--multiprocess \
+                    --processes $PROCESSES \
+                    --log-raw test-wpt-mp.log \
+                    --log-errorsummary wpt-mp-errorsummary.log \
+                    eventsource \
+                    | cat
+                time env PYTHONIOENCODING=utf-8 python3 ./mach test-wpt --release --binary-arg=--multiprocess \
                     --processes $PROCESSES \
                     --log-raw test-wpt-mp.log \
                     --log-errorsummary wpt-mp-errorsummary.log \
@@ -872,19 +766,6 @@ def linux_build_task(name, *, build_env=build_env):
         .with_script("./mach bootstrap-gstreamer")
     )
     return task
-
-
-def android_build_task(name):
-    return (
-        linux_build_task(name)
-        # file: NDK parses $(file $SHELL) to tell x64 host from x86
-        # wget: servo-media-gstreamer’s build script
-        .with_script("""
-            time apt-get update -q
-            time apt-get install -y --no-install-recommends openjdk-8-jdk-headless file wget
-            time ./mach bootstrap-android --accept-all-licences --build
-        """)
-    )
 
 
 def windows_build_task(name, package=True, arch="x86_64"):

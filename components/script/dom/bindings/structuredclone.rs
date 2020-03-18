@@ -5,7 +5,6 @@
 //! This module implements structured cloning, as defined by [HTML]
 //! (https://html.spec.whatwg.org/multipage/#safe-passing-of-structured-data).
 
-use crate::compartments::enter_realm;
 use crate::dom::bindings::conversions::{root_from_object, ToJSValConvertible};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::DomObject;
@@ -15,6 +14,7 @@ use crate::dom::bindings::transferable::Transferable;
 use crate::dom::blob::Blob;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageport::MessagePort;
+use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use js::glue::CopyJSStructuredCloneData;
 use js::glue::DeleteJSAutoStructuredCloneBuffer;
@@ -129,8 +129,9 @@ unsafe extern "C" fn read_callback(
         "tag should be higher than StructuredCloneTags::Min"
     );
     if tag == StructuredCloneTags::DomBlob as u32 {
+        let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
         return read_blob(
-            &GlobalScope::from_context(cx),
+            &GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof)),
             r,
             &mut *(closure as *mut StructuredDataHolder),
         );
@@ -145,8 +146,9 @@ unsafe extern "C" fn write_callback(
     closure: *mut raw::c_void,
 ) -> bool {
     if let Ok(blob) = root_from_object::<Blob>(*obj, cx) {
+        let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
         return write_blob(
-            &GlobalScope::from_context(cx),
+            &GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof)),
             blob,
             w,
             &mut *(closure as *mut StructuredDataHolder),
@@ -166,7 +168,8 @@ unsafe extern "C" fn read_transfer_callback(
 ) -> bool {
     if tag == StructuredCloneTags::MessagePort as u32 {
         let mut sc_holder = &mut *(closure as *mut StructuredDataHolder);
-        let owner = GlobalScope::from_context(cx);
+        let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
+        let owner = GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof));
         if let Ok(_) = <MessagePort as Transferable>::transfer_receive(
             &owner,
             &mut sc_holder,
@@ -358,6 +361,9 @@ pub fn read(
             JS_STRUCTURED_CLONE_VERSION,
             StructuredCloneScope::DifferentProcess,
             rval,
+            CloneDataPolicy {
+                sharedArrayBuffer_: false,
+            },
             &STRUCTURED_CLONE_CALLBACKS,
             sc_holder_ptr as *mut raw::c_void,
         );

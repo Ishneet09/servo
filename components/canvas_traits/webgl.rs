@@ -14,6 +14,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::Deref;
 use webrender_api::{DocumentId, ImageKey, PipelineId};
 use webvr_traits::WebVRPoseInformation;
+use webxr_api::SessionId;
 use webxr_api::SwapChainId as WebXRSwapChainId;
 
 /// Helper function that creates a WebGL channel (WebGLSender, WebGLReceiver) to be used in WebGLCommands.
@@ -80,9 +81,14 @@ pub enum WebGLMsg {
         WebGLContextId,
         Size2D<i32>,
         WebGLSender<Option<WebXRSwapChainId>>,
+        SessionId,
     ),
     /// Performs a buffer swap.
-    SwapBuffers(Vec<SwapChainId>, WebGLSender<()>),
+    ///
+    /// The third field contains the time (in ns) when the request
+    /// was initiated. The u64 in the second field will be the time the
+    /// request is fulfilled
+    SwapBuffers(Vec<SwapChainId>, WebGLSender<u64>, u64),
     /// Frees all resources and closes the thread.
     Exit,
 }
@@ -184,9 +190,14 @@ impl WebGLMsgSender {
         &self,
         size: Size2D<i32>,
         sender: WebGLSender<Option<WebXRSwapChainId>>,
+        id: SessionId,
     ) -> WebGLSendResult {
-        self.sender
-            .send(WebGLMsg::CreateWebXRSwapChain(self.ctx_id, size, sender))
+        self.sender.send(WebGLMsg::CreateWebXRSwapChain(
+            self.ctx_id,
+            size,
+            sender,
+            id,
+        ))
     }
 
     #[inline]
@@ -195,9 +206,23 @@ impl WebGLMsgSender {
             .map(|id| SwapChainId::Framebuffer(self.ctx_id, id))
             .unwrap_or_else(|| SwapChainId::Context(self.ctx_id));
         let (sender, receiver) = webgl_channel()?;
+        #[allow(unused)]
+        let mut time = 0;
+        #[cfg(feature = "xr-profile")]
+        {
+            time = time::precise_time_ns();
+        }
+
         self.sender
-            .send(WebGLMsg::SwapBuffers(vec![swap_id], sender))?;
-        receiver.recv()?;
+            .send(WebGLMsg::SwapBuffers(vec![swap_id], sender, time))?;
+
+        #[allow(unused)]
+        let sent_time = receiver.recv()?;
+        #[cfg(feature = "xr-profile")]
+        println!(
+            "WEBXR PROFILING [swap complete]:\t{}ms",
+            (time::precise_time_ns() - sent_time) as f64 / 1_000_000.
+        );
         Ok(())
     }
 
@@ -287,6 +312,7 @@ pub enum WebGLCommand {
     FramebufferTexture2D(u32, u32, u32, Option<WebGLTextureId>, i32),
     GetExtensions(WebGLSender<String>),
     GetShaderPrecisionFormat(u32, u32, WebGLSender<(i32, i32, i32)>),
+    GetFragDataLocation(WebGLProgramId, String, WebGLSender<i32>),
     GetUniformLocation(WebGLProgramId, String, WebGLSender<i32>),
     GetShaderInfoLog(WebGLShaderId, WebGLSender<String>),
     GetProgramInfoLog(WebGLProgramId, WebGLSender<String>),
@@ -304,6 +330,7 @@ pub enum WebGLCommand {
     TransformFeedbackVaryings(WebGLProgramId, Vec<String>, u32),
     PolygonOffset(f32, f32),
     RenderbufferStorage(u32, u32, i32, i32),
+    RenderbufferStorageMultisample(u32, i32, u32, i32, i32),
     ReadPixels(Rect<u32>, u32, u32, IpcBytesSender),
     ReadPixelsPP(Rect<i32>, u32, u32, usize),
     SampleCoverage(f32, bool),
@@ -432,6 +459,7 @@ pub enum WebGLCommand {
     GetCurrentVertexAttrib(u32, WebGLSender<[f32; 4]>),
     GetTexParameterFloat(u32, TexParameterFloat, WebGLSender<f32>),
     GetTexParameterInt(u32, TexParameterInt, WebGLSender<i32>),
+    GetInternalFormatIntVec(u32, u32, InternalFormatIntVec, WebGLSender<Vec<i32>>),
     TexParameteri(u32, u32, i32),
     TexParameterf(u32, u32, f32),
     DrawArrays {
@@ -511,6 +539,15 @@ pub enum WebGLCommand {
     GetSamplerParameterInt(WebGLSamplerId, u32, WebGLSender<i32>),
     BindBufferBase(u32, u32, Option<WebGLBufferId>),
     BindBufferRange(u32, u32, Option<WebGLBufferId>, i64, i64),
+    ClearBufferfv(u32, i32, Vec<f32>),
+    ClearBufferiv(u32, i32, Vec<i32>),
+    ClearBufferuiv(u32, i32, Vec<u32>),
+    ClearBufferfi(u32, i32, f32, i32),
+    InvalidateFramebuffer(u32, Vec<u32>),
+    InvalidateSubFramebuffer(u32, Vec<u32>, i32, i32, i32, i32),
+    FramebufferTextureLayer(u32, u32, Option<WebGLTextureId>, i32, i32),
+    ReadBuffer(u32),
+    DrawBuffers(Vec<u32>),
 }
 
 macro_rules! nonzero_type {
@@ -880,6 +917,14 @@ parameters! {
     }
 }
 
+parameters! {
+    InternalFormatParameter {
+        IntVec(InternalFormatIntVec {
+            Samples = gl::SAMPLES,
+        }),
+    }
+}
+
 #[macro_export]
 macro_rules! gl_enums {
     ($(pub enum $name:ident { $($variant:ident = $mod:ident::$constant:ident,)+ })*) => {
@@ -1050,5 +1095,7 @@ pub struct GLLimits {
     pub max_vertex_uniform_components: u32,
     pub max_fragment_uniform_blocks: u32,
     pub max_fragment_uniform_components: u32,
+    pub max_3d_texture_size: u32,
+    pub max_array_texture_layers: u32,
     pub uniform_buffer_offset_alignment: u32,
 }

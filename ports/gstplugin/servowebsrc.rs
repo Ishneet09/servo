@@ -12,7 +12,6 @@ use euclid::Rect;
 use euclid::Scale;
 use euclid::Size2D;
 
-use glib::glib_bool_error;
 use glib::glib_object_impl;
 use glib::glib_object_subclass;
 use glib::object::Cast;
@@ -91,6 +90,7 @@ use surfman::GLApi;
 use surfman::GLVersion;
 use surfman::SurfaceAccess;
 use surfman::SurfaceType;
+use surfman_chains::SurfmanProvider;
 use surfman_chains::SwapChain;
 use surfman_chains_api::SwapChainAPI;
 
@@ -110,6 +110,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -359,7 +360,8 @@ impl ServoWebSrcWindow {
             (gl::FRAMEBUFFER_COMPLETE, gl::NO_ERROR)
         );
 
-        let swap_chain = SwapChain::create_attached(&mut device, &mut context, access)
+        let provider = Box::new(SurfmanProvider::new(access));
+        let swap_chain = SwapChain::create_attached(&mut device, &mut context, provider)
             .expect("Failed to create swap chain");
 
         device.make_no_context_current().unwrap();
@@ -519,7 +521,7 @@ impl ObjectSubclass for ServoWebSrc {
             env!("CARGO_PKG_AUTHORS"),
         );
 
-        let src_caps = Caps::from_string(CAPS).unwrap();
+        let src_caps = Caps::from_str(CAPS).unwrap();
         let src_pad_template =
             PadTemplate::new("src", PadDirection::Src, PadPresence::Always, &src_caps).unwrap();
         klass.add_pad_template(src_pad_template);
@@ -546,7 +548,7 @@ impl ObjectImpl for ServoWebSrc {
             Property("url", ..) => {
                 let mut guard = self.url.lock().expect("Failed to lock mutex");
                 let url = value.get().expect("Failed to get url value");
-                *guard = Some(url);
+                *guard = url;
             },
             _ => unimplemented!(),
         }
@@ -572,14 +574,14 @@ impl BaseSrcImpl for ServoWebSrc {
 
         // Save the video info for later use
         let info = VideoInfo::from_caps(outcaps)
-            .ok_or_else(|| gst_loggable_error!(CATEGORY, "Failed to get video info"))?;
+            .map_err(|_| gst_loggable_error!(CATEGORY, "Failed to get video info"))?;
         *self.info.lock().unwrap() = Some(info);
 
         // Save the framerate if it is set
         let framerate = outcaps
             .get_structure(0)
-            .and_then(|cap| cap.get::<Fraction>("framerate"));
-        if let Some(framerate) = framerate {
+            .and_then(|cap| cap.get::<Fraction>("framerate").ok());
+        if let Some(Some(framerate)) = framerate {
             let frame_duration_micros =
                 1_000_000 * *framerate.denom() as u64 / *framerate.numer() as u64;
             debug!("Setting frame duration to {}micros", frame_duration_micros);

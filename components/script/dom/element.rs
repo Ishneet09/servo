@@ -11,7 +11,6 @@ use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
 use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -39,7 +38,6 @@ use crate::dom::document::{determine_policy_for_token, Document, LayoutDocumentH
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::domrect::DOMRect;
 use crate::dom::domtokenlist::DOMTokenList;
-use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::htmlbodyelement::{HTMLBodyElement, HTMLBodyElementLayoutHelpers};
@@ -324,14 +322,23 @@ impl Element {
     }
 
     pub fn set_custom_element_state(&self, state: CustomElementState) {
-        self.ensure_rare_data().custom_element_state = state;
+        // no need to inflate rare data for uncustomized
+        if state != CustomElementState::Uncustomized || self.rare_data().is_some() {
+            self.ensure_rare_data().custom_element_state = state;
+        }
+        // https://dom.spec.whatwg.org/#concept-element-defined
+        let in_defined_state = match state {
+            CustomElementState::Uncustomized | CustomElementState::Custom => true,
+            _ => false,
+        };
+        self.set_state(ElementState::IN_DEFINED_STATE, in_defined_state)
     }
 
     pub fn get_custom_element_state(&self) -> CustomElementState {
         if let Some(rare_data) = self.rare_data().as_ref() {
             return rare_data.custom_element_state;
         }
-        CustomElementState::Undefined
+        CustomElementState::Uncustomized
     }
 
     pub fn set_custom_element_definition(&self, definition: Rc<CustomElementDefinition>) {
@@ -340,6 +347,10 @@ impl Element {
 
     pub fn get_custom_element_definition(&self) -> Option<Rc<CustomElementDefinition>> {
         self.rare_data().as_ref()?.custom_element_definition.clone()
+    }
+
+    pub fn clear_custom_element_definition(&self) {
+        self.ensure_rare_data().custom_element_definition = None;
     }
 
     pub fn push_callback_reaction(&self, function: Rc<Function>, args: Box<[Heap<JSVal>]>) {
@@ -509,6 +520,35 @@ impl Element {
         } else {
             debug_assert!(false, "Trying to detach a non-attached shadow root");
         }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#translation-mode
+    pub fn is_translate_enabled(&self) -> bool {
+        // TODO change this to local_name! when html5ever updates
+        let name = &LocalName::from("translate");
+        if self.has_attribute(name) {
+            match &*self.get_string_attribute(name) {
+                "yes" | "" => return true,
+                "no" => return false,
+                _ => {},
+            }
+        }
+        if let Some(parent) = self.upcast::<Node>().GetParentNode() {
+            if let Some(elem) = parent.downcast::<Element>() {
+                return elem.is_translate_enabled();
+            }
+        }
+        true // whatwg/html#5239
+    }
+
+    // https://html.spec.whatwg.org/multipage/#the-directionality
+    pub fn directionality(&self) -> String {
+        self.downcast::<HTMLElement>()
+            .and_then(|html_element| html_element.directionality())
+            .unwrap_or_else(|| {
+                let node = self.upcast::<Node>();
+                node.parent_directionality()
+            })
     }
 }
 
@@ -1145,6 +1185,10 @@ impl Element {
         ns!()
     }
 
+    pub fn name_attribute(&self) -> Option<Atom> {
+        self.rare_data().as_ref()?.name_attribute.clone()
+    }
+
     pub fn style_attribute(&self) -> &DomRefCell<Option<Arc<Locked<PropertyDeclarationBlock>>>> {
         &self.style_attribute
     }
@@ -1388,11 +1432,27 @@ impl Element {
     // https://dom.spec.whatwg.org/#concept-element-attributes-get-by-name
     pub fn get_attribute_by_name(&self, name: DOMString) -> Option<DomRoot<Attr>> {
         let name = &self.parsed_name(name);
-        self.attrs
+        let maybe_attribute = self
+            .attrs
             .borrow()
             .iter()
             .find(|a| a.name() == name)
-            .map(|js| DomRoot::from_ref(&**js))
+            .map(|js| DomRoot::from_ref(&**js));
+        fn id_and_name_must_be_atoms(name: &LocalName, maybe_attr: &Option<DomRoot<Attr>>) -> bool {
+            if *name == local_name!("id") || *name == local_name!("name") {
+                match maybe_attr {
+                    None => true,
+                    Some(ref attr) => match *attr.value() {
+                        AttrValue::Atom(_) => true,
+                        _ => false,
+                    },
+                }
+            } else {
+                true
+            }
+        }
+        debug_assert!(id_and_name_must_be_atoms(name, &maybe_attribute));
+        maybe_attribute
     }
 
     pub fn set_attribute_from_parser(
@@ -1787,6 +1847,14 @@ impl Element {
         let other = other.upcast::<Element>();
         self.root_element() == other.root_element()
     }
+
+    pub fn get_id(&self) -> Option<Atom> {
+        self.id_attribute.borrow().clone()
+    }
+
+    pub fn get_name(&self) -> Option<Atom> {
+        self.rare_data().as_ref()?.name_attribute.clone()
+    }
 }
 
 impl ElementMethods for Element {
@@ -1823,6 +1891,8 @@ impl ElementMethods for Element {
     }
 
     // https://dom.spec.whatwg.org/#dom-element-id
+    // This always returns a string; if you'd rather see None
+    // on a null id, call get_id
     fn Id(&self) -> DOMString {
         self.get_string_attribute(&local_name!("id"))
     }
@@ -2745,26 +2815,59 @@ impl VirtualMethods for Element {
                             if let Some(old_value) = old_value {
                                 let old_value = old_value.as_atom().clone();
                                 if let Some(ref shadow_root) = containing_shadow_root {
-                                    shadow_root.unregister_named_element(self, old_value);
+                                    shadow_root.unregister_element_id(self, old_value);
                                 } else {
-                                    doc.unregister_named_element(self, old_value);
+                                    doc.unregister_element_id(self, old_value);
                                 }
                             }
                             if value != atom!("") {
                                 if let Some(ref shadow_root) = containing_shadow_root {
-                                    shadow_root.register_named_element(self, value);
+                                    shadow_root.register_element_id(self, value);
                                 } else {
-                                    doc.register_named_element(self, value);
+                                    doc.register_element_id(self, value);
                                 }
                             }
                         },
                         AttributeMutation::Removed => {
                             if value != atom!("") {
                                 if let Some(ref shadow_root) = containing_shadow_root {
-                                    shadow_root.unregister_named_element(self, value);
+                                    shadow_root.unregister_element_id(self, value);
                                 } else {
-                                    doc.unregister_named_element(self, value);
+                                    doc.unregister_element_id(self, value);
                                 }
+                            }
+                        },
+                    }
+                }
+            },
+            &local_name!("name") => {
+                // Keep the name in rare data for fast access
+                self.ensure_rare_data().name_attribute =
+                    mutation.new_value(attr).and_then(|value| {
+                        let value = value.as_atom();
+                        if value != &atom!("") {
+                            Some(value.clone())
+                        } else {
+                            None
+                        }
+                    });
+                // Keep the document name_map up to date
+                // (if we're not in shadow DOM)
+                if node.is_connected() && node.containing_shadow_root().is_none() {
+                    let value = attr.value().as_atom().clone();
+                    match mutation {
+                        AttributeMutation::Set(old_value) => {
+                            if let Some(old_value) = old_value {
+                                let old_value = old_value.as_atom().clone();
+                                doc.unregister_element_name(self, old_value);
+                            }
+                            if value != atom!("") {
+                                doc.register_element_name(self, value);
+                            }
+                        },
+                        AttributeMutation::Removed => {
+                            if value != atom!("") {
+                                doc.unregister_element_name(self, value);
                             }
                         },
                     }
@@ -2788,6 +2891,7 @@ impl VirtualMethods for Element {
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
             &local_name!("id") => AttrValue::from_atomic(value.into()),
+            &local_name!("name") => AttrValue::from_atomic(value.into()),
             &local_name!("class") => AttrValue::from_serialized_tokenlist(value.into()),
             _ => self
                 .super_type()
@@ -2823,11 +2927,17 @@ impl VirtualMethods for Element {
 
         if let Some(ref value) = *self.id_attribute.borrow() {
             if let Some(shadow_root) = self.upcast::<Node>().containing_shadow_root() {
-                shadow_root.register_named_element(self, value.clone());
+                shadow_root.register_element_id(self, value.clone());
             } else {
-                doc.register_named_element(self, value.clone());
+                doc.register_element_id(self, value.clone());
             }
         }
+        if let Some(ref value) = self.name_attribute() {
+            if self.upcast::<Node>().containing_shadow_root().is_none() {
+                doc.register_element_name(self, value.clone());
+            }
+        }
+
         // This is used for layout optimization.
         doc.increment_dom_count();
     }
@@ -2860,7 +2970,10 @@ impl VirtualMethods for Element {
             doc.exit_fullscreen();
         }
         if let Some(ref value) = *self.id_attribute.borrow() {
-            doc.unregister_named_element(self, value.clone());
+            doc.unregister_element_id(self, value.clone());
+        }
+        if let Some(ref value) = self.name_attribute() {
+            doc.unregister_element_name(self, value.clone());
         }
         // This is used for layout optimization.
         doc.decrement_dom_count();
@@ -3035,6 +3148,7 @@ impl<'a> SelectorsElement for DomRoot<Element> {
             NonTSPseudoClass::Focus |
             NonTSPseudoClass::Fullscreen |
             NonTSPseudoClass::Hover |
+            NonTSPseudoClass::Defined |
             NonTSPseudoClass::Enabled |
             NonTSPseudoClass::Disabled |
             NonTSPseudoClass::Checked |
@@ -3206,52 +3320,6 @@ impl Element {
                 None
             },
         }
-    }
-
-    /// Please call this method *only* for real click events
-    ///
-    /// <https://html.spec.whatwg.org/multipage/#run-authentic-click-activation-steps>
-    ///
-    /// Use an element's synthetic click activation (or handle_event) for any script-triggered clicks.
-    /// If the spec says otherwise, check with Manishearth first
-    pub fn authentic_click_activation(&self, event: &Event) {
-        // Not explicitly part of the spec, however this helps enforce the invariants
-        // required to save state between pre-activation and post-activation
-        // since we cannot nest authentic clicks (unlike synthetic click activation, where
-        // the script can generate more click events from the handler)
-        assert!(!self.click_in_progress());
-
-        let target = self.upcast();
-        // Step 2 (requires canvas support)
-        // Step 3
-        self.set_click_in_progress(true);
-        // Step 4
-        let e = self.nearest_activable_element();
-        match e {
-            Some(ref el) => match el.as_maybe_activatable() {
-                Some(elem) => {
-                    // Step 5-6
-                    elem.pre_click_activation();
-                    event.fire(target);
-                    if !event.DefaultPrevented() {
-                        // post click activation
-                        elem.activation_behavior(event, target);
-                    } else {
-                        elem.canceled_activation();
-                    }
-                },
-                // Step 6
-                None => {
-                    event.fire(target);
-                },
-            },
-            // Step 6
-            None => {
-                event.fire(target);
-            },
-        }
-        // Step 7
-        self.set_click_in_progress(false);
     }
 
     // https://html.spec.whatwg.org/multipage/#language

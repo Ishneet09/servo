@@ -16,7 +16,7 @@ bench = false
 simpleservo = { path = "../api" }
 log = "0.4"
 lazy_static = "1"
-env_logger = "0.6"
+env_logger = "0.7"
 backtrace = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -27,8 +27,6 @@ winapi = {version = "0.3", features = ["wingdi", "winuser", "winnt", "winbase", 
 cbindgen = "0.9"
 
 [features]
-canvas2d-azure = ["simpleservo/canvas2d-azure"]
-canvas2d-raqote = ["simpleservo/canvas2d-raqote"]
 debugmozjs = ["simpleservo/debugmozjs"]
 default = ["webdriver", "max_log_level"]
 media-dummy = ["simpleservo/media-dummy"]
@@ -43,7 +41,10 @@ max_log_level = ["simpleservo/max_log_level"]
 native-bluetooth = ["simpleservo/native-bluetooth"]
 no-wgl = ["simpleservo/no-wgl"]
 oculusvr = ["simpleservo/oculusvr"]
+profilemozjs = ["simpleservo/profilemozjs"]
 refcell_backtrace = ["simpleservo/refcell_backtrace"]
 uwp = ["simpleservo/uwp"]
 webdriver = ["simpleservo/webdriver"]
 webgl_backtrace = ["simpleservo/webgl_backtrace"]
+vslatestinstalled = ["simpleservo/vslatestinstalled"]
+xr-profile = ["simpleservo/xr-profile"]

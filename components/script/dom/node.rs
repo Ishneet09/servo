@@ -37,6 +37,7 @@ use crate::dom::document::{Document, DocumentSource, HasBrowsingContext, IsHTMLD
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documenttype::DocumentType;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
+use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlbodyelement::HTMLBodyElement;
@@ -51,6 +52,7 @@ use crate::dom::htmlmediaelement::{HTMLMediaElement, LayoutHTMLMediaElementHelpe
 use crate::dom::htmlmetaelement::HTMLMetaElement;
 use crate::dom::htmlstyleelement::HTMLStyleElement;
 use crate::dom::htmltextareaelement::{HTMLTextAreaElement, LayoutHTMLTextAreaElementHelpers};
+use crate::dom::mouseevent::MouseEvent;
 use crate::dom::mutationobserver::{Mutation, MutationObserver, RegisteredObserver};
 use crate::dom::nodelist::NodeList;
 use crate::dom::processinginstruction::ProcessingInstruction;
@@ -65,6 +67,7 @@ use crate::dom::window::Window;
 use crate::script_runtime::JSContext;
 use crate::script_thread::ScriptThread;
 use app_units::Au;
+use crossbeam_channel::Sender;
 use devtools_traits::NodeInfo;
 use dom_struct::dom_struct;
 use euclid::default::{Point2D, Rect, Size2D, Vector2D};
@@ -83,6 +86,7 @@ use script_traits::UntrustedNodeAddress;
 use selectors::matching::{matches_selector_list, MatchingContext, MatchingMode};
 use selectors::parser::SelectorList;
 use servo_arc::Arc;
+use servo_atoms::Atom;
 use servo_url::ServoUrl;
 use smallvec::SmallVec;
 use std::borrow::ToOwned;
@@ -165,12 +169,11 @@ bitflags! {
 
         #[doc = "Specifies whether this node needs style recalc on next reflow."]
         const HAS_DIRTY_DESCENDANTS = 1 << 1;
-        // TODO: find a better place to keep this (#4105)
-        // https://critic.hoppipolla.co.uk/showcomment?chain=8873
-        // Perhaps using a Set in Document?
+
         #[doc = "Specifies whether or not there is an authentic click in progress on \
                  this element."]
         const CLICK_IN_PROGRESS = 1 << 2;
+
         #[doc = "Specifies whether this node is focusable and whether it is supposed \
                  to be reachable with using sequential focus navigation."]
         const SEQUENTIALLY_FOCUSABLE = 1 << 3;
@@ -207,7 +210,9 @@ impl NodeFlags {
 impl Drop for Node {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
-        self.style_and_layout_data.get().map(|d| self.dispose(d));
+        if let Some(data) = self.style_and_layout_data.get() {
+            self.dispose(data, ScriptThread::get_any_layout_chan().as_ref());
+        }
     }
 }
 
@@ -222,15 +227,16 @@ enum SuppressObserver {
 
 impl Node {
     /// Sends the style and layout data, if any, back to the layout thread to be destroyed.
-    pub fn dispose(&self, data: OpaqueStyleAndLayoutData) {
+    pub(crate) fn dispose(
+        &self,
+        data: OpaqueStyleAndLayoutData,
+        layout_chan: Option<&Sender<Msg>>,
+    ) {
         debug_assert!(thread_state::get().is_script());
-        let win = window_from_node(self);
         self.style_and_layout_data.set(None);
-        if win
-            .layout_chan()
-            .send(Msg::ReapStyleAndLayoutData(data))
-            .is_err()
-        {
+        if layout_chan.map_or(false, |chan| {
+            chan.send(Msg::ReapStyleAndLayoutData(data)).is_err()
+        }) {
             warn!("layout thread unreachable - leaking layout data");
         }
     }
@@ -313,12 +319,16 @@ impl Node {
                 false,
             );
         }
+        let window = window_from_node(root);
+        let layout_chan = window.layout_chan();
         for node in root.traverse_preorder(ShadowIncluding::Yes) {
             // This needs to be in its own loop, because unbind_from_tree may
             // rely on the state of IS_IN_DOC of the context node's descendants,
             // e.g. when removing a <form>.
             vtable_for(&&*node).unbind_from_tree(&context);
-            node.style_and_layout_data.get().map(|d| node.dispose(d));
+            if let Some(data) = node.style_and_layout_data.get() {
+                node.dispose(data, Some(layout_chan));
+            }
             // https://dom.spec.whatwg.org/#concept-node-remove step 14
             if let Some(element) = node.as_custom_element() {
                 ScriptThread::enqueue_callback_reaction(
@@ -390,6 +400,66 @@ impl Node {
             }
         })
     }
+
+    // https://html.spec.whatg.org/#fire_a_synthetic_mouse_event
+    pub fn fire_synthetic_mouse_event_not_trusted(&self, name: DOMString) {
+        // Spec says the choice of which global to create
+        // the mouse event on is not well-defined,
+        // and refers to heycam/webidl#135
+        let win = window_from_node(self);
+
+        let mouse_event = MouseEvent::new(
+            &win, // ambiguous in spec
+            name,
+            EventBubbles::Bubbles,       // Step 3: bubbles
+            EventCancelable::Cancelable, // Step 3: cancelable,
+            Some(&win),                  // Step 7: view (this is unambiguous in spec)
+            0,                           // detail uninitialized
+            0,                           // coordinates uninitialized
+            0,                           // coordinates uninitialized
+            0,                           // coordinates uninitialized
+            0,                           // coordinates uninitialized
+            false,
+            false,
+            false,
+            false, // Step 6 modifier keys TODO compositor hook needed
+            0,     // button uninitialized (and therefore left)
+            0,     // buttons uninitialized (and therefore none)
+            None,  // related_target uninitialized,
+            None,  // point_in_target uninitialized,
+        );
+
+        // Step 4: TODO composed flag for shadow root
+
+        // Step 5
+        mouse_event.upcast::<Event>().set_trusted(false);
+
+        // Step 8: TODO keyboard modifiers
+
+        mouse_event
+            .upcast::<Event>()
+            .dispatch(self.upcast::<EventTarget>(), false);
+    }
+
+    pub fn parent_directionality(&self) -> String {
+        let mut current = self.GetParentNode();
+
+        loop {
+            match current {
+                Some(node) => {
+                    if let Some(directionality) = node
+                        .downcast::<HTMLElement>()
+                        .and_then(|html_element| html_element.directionality())
+                    {
+                        return directionality;
+                    } else {
+                        current = node.GetParentNode();
+                    }
+                },
+                None => return "ltr".to_owned(),
+            }
+        }
+    }
 }
 
 pub struct QuerySelectorIterator {
@@ -439,10 +509,12 @@ impl<'a> Iterator for QuerySelectorIterator {
 impl Node {
     impl_rare_data!(NodeRareData);
 
-    pub fn teardown(&self) {
-        self.style_and_layout_data.get().map(|d| self.dispose(d));
+    pub(crate) fn teardown(&self, layout_chan: &Sender<Msg>) {
+        if let Some(data) = self.style_and_layout_data.get() {
+            self.dispose(data, Some(layout_chan));
+        }
         for kid in self.children() {
-            kid.teardown();
+            kid.teardown(layout_chan);
         }
     }
 
@@ -1169,6 +1241,34 @@ impl Node {
                     .Host()
                     .upcast::<Node>(),
             );
+        }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-document-nameditem-filter
+    pub fn is_document_named_item(&self, name: &Atom) -> bool {
+        let html_elem_type = match self.type_id() {
+            NodeTypeId::Element(ElementTypeId::HTMLElement(type_)) => type_,
+            _ => return false,
+        };
+        let elem = self
+            .downcast::<Element>()
+            .expect("Node with an Element::HTMLElement NodeTypeID must be an Element");
+        match html_elem_type {
+            HTMLElementTypeId::HTMLFormElement | HTMLElementTypeId::HTMLIFrameElement => {
+                elem.get_name().map_or(false, |n| n == *name)
+            },
+            HTMLElementTypeId::HTMLImageElement =>
+            // Images can match by id, but only when their name is non-empty.
+            {
+                elem.get_name().map_or(false, |n| {
+                    n == *name || elem.get_id().map_or(false, |i| i == *name)
+                })
+            },
+            // TODO: Handle <embed> and <object>; these depend on
+            // whether the element is "exposed", a concept which
+            // doesn't fully make sense until embed/object behaviors
+            // are actually implemented.
+            _ => false,
         }
     }
 }

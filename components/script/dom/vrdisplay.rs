@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::InCompartment;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
@@ -24,7 +23,6 @@ use crate::dom::bindings::root::{DomRoot, MutDom, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
-use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::vrdisplaycapabilities::VRDisplayCapabilities;
 use crate::dom::vrdisplayevent::VRDisplayEvent;
@@ -33,6 +31,8 @@ use crate::dom::vrframedata::VRFrameData;
 use crate::dom::vrpose::VRPose;
 use crate::dom::vrstageparameters::VRStageParameters;
 use crate::dom::webglrenderingcontext::{WebGLMessageSender, WebGLRenderingContext};
+use crate::dom::window::Window;
+use crate::realms::InRealm;
 use crate::script_runtime::CommonScriptMsg;
 use crate::script_runtime::ScriptThreadEventCategory::WebVREvent;
 use crate::task_source::{TaskSource, TaskSourceName};
@@ -40,6 +40,7 @@ use canvas_traits::webgl::{webgl_channel, WebGLReceiver, WebVRCommand};
 use crossbeam_channel::{unbounded, Sender};
 use dom_struct::dom_struct;
 use ipc_channel::ipc::IpcSender;
+use msg::constellation_msg::PipelineId;
 use profile_traits::ipc;
 use std::cell::Cell;
 use std::mem;
@@ -82,6 +83,9 @@ pub struct VRDisplay {
     running_display_raf: Cell<bool>,
     paused: Cell<bool>,
     stopped_on_pause: Cell<bool>,
+    #[ignore_malloc_size_of = "channels are hard"]
+    webvr_thread: IpcSender<WebVRMsg>,
+    pipeline: PipelineId,
 }
 
 unsafe_no_jsmanaged_fields!(WebVRDisplayData);
@@ -110,7 +114,7 @@ struct VRRAFUpdate {
 type VRRAFUpdateSender = Sender<Result<VRRAFUpdate, ()>>;
 
 impl VRDisplay {
-    fn new_inherited(global: &GlobalScope, display: WebVRDisplayData) -> VRDisplay {
+    fn new_inherited(global: &Window, display: WebVRDisplayData) -> VRDisplay {
         let stage = match display.stage_parameters {
             Some(ref params) => Some(VRStageParameters::new(params.clone(), &global)),
             None => None,
@@ -152,10 +156,12 @@ impl VRDisplay {
             // This flag is set when the Display was presenting when it received a VR Pause event.
             // When the VR Resume event is received and the flag is set, VR presentation automatically restarts.
             stopped_on_pause: Cell::new(false),
+            webvr_thread: global.webvr_thread().expect("webvr is disabled"),
+            pipeline: global.pipeline_id(),
         }
     }
 
-    pub fn new(global: &GlobalScope, display: WebVRDisplayData) -> DomRoot<VRDisplay> {
+    pub fn new(global: &Window, display: WebVRDisplayData) -> DomRoot<VRDisplay> {
         reflect_dom_object(
             Box::new(VRDisplay::new_inherited(&global, display)),
             global,
@@ -229,7 +235,7 @@ impl VRDisplayMethods for VRDisplay {
 
         // If not presenting we fetch inmediante VRFrameData
         let (sender, receiver) = ipc::channel(self.global().time_profiler_chan().clone()).unwrap();
-        self.webvr_thread()
+        self.webvr_thread
             .send(WebVRMsg::GetFrameData(
                 self.global().pipeline_id(),
                 self.DisplayId(),
@@ -258,7 +264,7 @@ impl VRDisplayMethods for VRDisplay {
     // https://w3c.github.io/webvr/#dom-vrdisplay-resetpose
     fn ResetPose(&self) {
         let (sender, receiver) = ipc::channel(self.global().time_profiler_chan().clone()).unwrap();
-        self.webvr_thread()
+        self.webvr_thread
             .send(WebVRMsg::ResetPose(
                 self.global().pipeline_id(),
                 self.DisplayId(),
@@ -322,8 +328,8 @@ impl VRDisplayMethods for VRDisplay {
     }
 
     // https://w3c.github.io/webvr/#dom-vrdisplay-requestpresent
-    fn RequestPresent(&self, layers: Vec<VRLayer>, comp: InCompartment) -> Rc<Promise> {
-        let promise = Promise::new_in_current_compartment(&self.global(), comp);
+    fn RequestPresent(&self, layers: Vec<VRLayer>, comp: InRealm) -> Rc<Promise> {
+        let promise = Promise::new_in_current_realm(&self.global(), comp);
         // TODO: WebVR spec: this method must be called in response to a user gesture
 
         // WebVR spec: If canPresent is false the promise MUST be rejected
@@ -386,8 +392,8 @@ impl VRDisplayMethods for VRDisplay {
     }
 
     // https://w3c.github.io/webvr/#dom-vrdisplay-exitpresent
-    fn ExitPresent(&self, comp: InCompartment) -> Rc<Promise> {
-        let promise = Promise::new_in_current_compartment(&self.global(), comp);
+    fn ExitPresent(&self, comp: InRealm) -> Rc<Promise> {
+        let promise = Promise::new_in_current_realm(&self.global(), comp);
 
         // WebVR spec: If the VRDisplay is not presenting the promise MUST be rejected.
         if !self.presenting.get() {
@@ -398,7 +404,7 @@ impl VRDisplayMethods for VRDisplay {
 
         // Exit present
         let (sender, receiver) = ipc::channel(self.global().time_profiler_chan().clone()).unwrap();
-        self.webvr_thread()
+        self.webvr_thread
             .send(WebVRMsg::ExitPresent(
                 self.global().pipeline_id(),
                 self.display.borrow().display_id,
@@ -452,18 +458,14 @@ impl VRDisplayMethods for VRDisplay {
 }
 
 impl VRDisplay {
-    fn webvr_thread(&self) -> IpcSender<WebVRMsg> {
-        self.global()
-            .as_window()
-            .webvr_thread()
-            .expect("Shouldn't arrive here with WebVR disabled")
-    }
-
     pub fn update_display(&self, display: &WebVRDisplayData) {
         *self.display.borrow_mut() = display.clone();
         if let Some(ref stage) = display.stage_parameters {
             if self.stage_params.get().is_none() {
-                let params = Some(VRStageParameters::new(stage.clone(), &self.global()));
+                let params = Some(VRStageParameters::new(
+                    stage.clone(),
+                    &self.global().as_window(),
+                ));
                 self.stage_params.set(params.as_deref());
             } else {
                 self.stage_params.get().unwrap().update(&stage);
@@ -484,7 +486,7 @@ impl VRDisplay {
     {
         // Request Present
         let (sender, receiver) = ipc::channel(self.global().time_profiler_chan().clone()).unwrap();
-        self.webvr_thread()
+        self.webvr_thread
             .send(WebVRMsg::RequestPresent(
                 self.global().pipeline_id(),
                 self.display.borrow().display_id,
@@ -730,7 +732,7 @@ impl VRDisplay {
     // Only called when the JSContext is destroyed while presenting.
     // In this case we don't want to wait for WebVR Thread response.
     fn force_stop_present(&self) {
-        self.webvr_thread()
+        self.webvr_thread
             .send(WebVRMsg::ExitPresent(
                 self.global().pipeline_id(),
                 self.display.borrow().display_id,

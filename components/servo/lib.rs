@@ -65,13 +65,13 @@ fn webdriver(_port: u16, _constellation: Sender<ConstellationMsg>) {}
 
 use bluetooth::BluetoothThreadFactory;
 use bluetooth_traits::BluetoothRequest;
-use canvas::WebGLComm;
+use canvas::{SurfaceProviders, WebGLComm, WebGlExecutor};
 use canvas_traits::webgl::WebGLThreads;
 use compositing::compositor_thread::{
     CompositorProxy, CompositorReceiver, InitialCompositorState, Msg,
 };
 use compositing::windowing::{EmbedderMethods, WindowEvent, WindowMethods};
-use compositing::{CompositingReason, IOCompositor, ShutdownState};
+use compositing::{CompositingReason, ConstellationMsg, IOCompositor, ShutdownState};
 #[cfg(all(
     not(target_os = "windows"),
     not(target_os = "ios"),
@@ -106,9 +106,7 @@ use profile::time as profile_time;
 use profile_traits::mem;
 use profile_traits::time;
 use script::JSEngineSetup;
-use script_traits::{
-    ConstellationMsg, SWManagerSenders, ScriptToConstellationChan, WindowSizeData,
-};
+use script_traits::{SWManagerSenders, ScriptToConstellationChan, WindowSizeData};
 use servo_config::opts;
 use servo_config::{pref, prefs};
 use servo_media::player::context::GlContext;
@@ -117,6 +115,7 @@ use std::borrow::Cow;
 use std::cmp::max;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_os = "windows"))]
 use surfman::platform::default::device::Device as HWDevice;
@@ -358,8 +357,11 @@ where
             opts.profile_heartbeats,
         );
         let mem_profiler_chan = profile_mem::Profiler::create(opts.mem_profiler_period);
+
         let debugger_chan = opts.debugger_port.map(|port| debugger::start_server(port));
-        let devtools_chan = opts.devtools_port.map(|port| devtools::start_server(port));
+        let devtools_chan = opts
+            .devtools_port
+            .map(|port| devtools::start_server(port, embedder_proxy.clone()));
 
         let coordinates = window.get_coordinates();
         let device_pixel_ratio = coordinates.hidpi_factor.get();
@@ -430,14 +432,6 @@ where
             panic!("We don't currently support running both WebVR and WebXR");
         }
 
-        // For the moment, we enable use both the webxr crate and the rust-webvr crate,
-        // but we are migrating over to just using webxr.
-        let mut webxr_main_thread = webxr::MainThreadRegistry::new(event_loop_waker)
-            .expect("Failed to create WebXR device registry");
-        if pref!(dom.webxr.enabled) {
-            embedder.register_webxr(&mut webxr_main_thread);
-        }
-
         let mut webvr_heartbeats = Vec::new();
         let webvr_services = if pref!(dom.webvr.enabled) {
             let mut services = VRServiceManager::new();
@@ -466,7 +460,12 @@ where
         let (external_image_handlers, external_images) = WebrenderExternalImageHandlers::new();
         let mut external_image_handlers = Box::new(external_image_handlers);
 
-        let webgl_threads = create_webgl_threads(
+        // For the moment, we enable use both the webxr crate and the rust-webvr crate,
+        // but we are migrating over to just using webxr.
+        let mut webxr_main_thread = webxr::MainThreadRegistry::new(event_loop_waker)
+            .expect("Failed to create WebXR device registry");
+
+        let (webgl_threads, webgl_extras) = create_webgl_threads(
             &*window,
             &mut webrender,
             webrender_api_sender.clone(),
@@ -475,6 +474,16 @@ where
             &mut external_image_handlers,
             external_images.clone(),
         );
+
+        if pref!(dom.webxr.enabled) {
+            if let Some((webxr_surface_providers, webgl_executor)) = webgl_extras {
+                embedder.register_webxr(
+                    &mut webxr_main_thread,
+                    webgl_executor,
+                    webxr_surface_providers,
+                );
+            }
+        }
 
         let glplayer_threads = match window.get_gl_context() {
             GlContext::Unknown => None,
@@ -504,6 +513,8 @@ where
             device_pixel_ratio: Scale::new(device_pixel_ratio),
         };
 
+        let pending_wr_frame = Arc::new(AtomicBool::new(false));
+
         // Create the constellation, which maintains the engine
         // pipelines, including the script and layout threads, as well
         // as the navigation context.
@@ -526,6 +537,7 @@ where
             glplayer_threads,
             event_loop_waker,
             window_size,
+            pending_wr_frame.clone(),
         );
 
         // Send the constellation's swmanager sender to service worker manager thread
@@ -552,6 +564,7 @@ where
                 webrender_api,
                 webvr_heartbeats,
                 webxr_main_thread,
+                pending_wr_frame,
             },
             opts.output_file.clone(),
             opts.is_running_problem_test,
@@ -734,6 +747,19 @@ where
                     );
                 }
             },
+
+            WindowEvent::ChangeBrowserVisibility(top_level_browsing_context_id, visible) => {
+                let msg = ConstellationMsg::ChangeBrowserVisibility(
+                    top_level_browsing_context_id,
+                    visible,
+                );
+                if let Err(e) = self.constellation_chan.send(msg) {
+                    warn!(
+                        "Sending ChangeBrowserVisibility to constellation failed ({:?}).",
+                        e
+                    );
+                }
+            },
         }
     }
 
@@ -851,6 +877,7 @@ fn create_constellation(
     glplayer_threads: Option<GLPlayerThreads>,
     event_loop_waker: Option<Box<dyn EventLoopWaker>>,
     initial_window_size: WindowSizeData,
+    pending_wr_frame: Arc<AtomicBool>,
 ) -> (Sender<ConstellationMsg>, SWManagerSenders) {
     // Global configuration options, parsed from the command line.
     let opts = opts::get();
@@ -893,7 +920,11 @@ fn create_constellation(
         glplayer_threads,
         player_context,
         event_loop_waker,
+        pending_wr_frame,
     };
+
+    let (canvas_chan, ipc_canvas_chan) = canvas::canvas_paint_thread::CanvasPaintThread::start();
+
     let (constellation_chan, from_swmanager_sender) = Constellation::<
         script_layout_interface::message::Msg,
         layout_thread::LayoutThread,
@@ -906,6 +937,8 @@ fn create_constellation(
         opts.is_running_problem_test,
         opts.hard_fail,
         opts.enable_canvas_antialiasing,
+        canvas_chan,
+        ipc_canvas_chan,
     );
 
     if let Some(webvr_constellation_sender) = webvr_constellation_sender {
@@ -1034,7 +1067,10 @@ fn create_webgl_threads<W>(
     webxr_main_thread: &mut webxr::MainThreadRegistry,
     external_image_handlers: &mut WebrenderExternalImageHandlers,
     external_images: Arc<Mutex<WebrenderExternalImageRegistry>>,
-) -> Option<WebGLThreads>
+) -> (
+    Option<WebGLThreads>,
+    Option<(SurfaceProviders, WebGlExecutor)>,
+)
 where
     W: WindowMethods + 'static + ?Sized,
 {
@@ -1048,7 +1084,7 @@ where
                 Ok(a) => a,
                 Err(e) => {
                     warn!("Failed to create software graphics context: {:?}", e);
-                    return None;
+                    return (None, None);
                 },
             };
             (Device::Software(device), Context::Software(context))
@@ -1057,7 +1093,7 @@ where
                 Ok(a) => a,
                 Err(e) => {
                     warn!("Failed to create hardware graphics context: {:?}", e);
-                    return None;
+                    return (None, None);
                 },
             };
             (Device::Hardware(device), Context::Hardware(context))
@@ -1068,7 +1104,7 @@ where
         Ok(a) => a,
         Err(e) => {
             warn!("Failed to create graphics context: {:?}", e);
-            return None;
+            return (None, None);
         },
     };
 
@@ -1080,8 +1116,10 @@ where
     let WebGLComm {
         webgl_threads,
         webxr_swap_chains,
+        webxr_surface_providers,
         image_handler,
         output_handler,
+        webgl_executor,
     } = WebGLComm::new(
         device,
         context,
@@ -1103,5 +1141,8 @@ where
         webrender.set_output_image_handler(output_handler);
     }
 
-    Some(webgl_threads)
+    (
+        Some(webgl_threads),
+        Some((webxr_surface_providers, webgl_executor)),
+    )
 }

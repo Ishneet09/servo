@@ -83,8 +83,8 @@ use media::WindowGLContext;
 use metrics::{InteractiveMetrics, InteractiveWindow};
 use mime::Mime;
 use msg::constellation_msg::{
-    BlobId, BrowsingContextId, HistoryStateId, MessagePortId, MessagePortRouterId, PipelineId,
-    TopLevelBrowsingContextId,
+    BlobId, BroadcastChannelRouterId, BrowsingContextId, HistoryStateId, MessagePortId,
+    MessagePortRouterId, PipelineId, TopLevelBrowsingContextId,
 };
 use net_traits::filemanager_thread::RelativePos;
 use net_traits::image::base::{Image, ImageMetadata};
@@ -152,7 +152,9 @@ use tendril::{StrTendril, TendrilSink};
 use time::{Duration, Timespec, Tm};
 use uuid::Uuid;
 use webgpu::{
-    WebGPU, WebGPUAdapter, WebGPUBindGroupLayout, WebGPUBuffer, WebGPUDevice, WebGPUPipelineLayout,
+    wgpu::command::RawPass, WebGPU, WebGPUAdapter, WebGPUBindGroup, WebGPUBindGroupLayout,
+    WebGPUBuffer, WebGPUCommandBuffer, WebGPUCommandEncoder, WebGPUComputePipeline, WebGPUDevice,
+    WebGPUPipelineLayout, WebGPUQueue, WebGPUShaderModule,
 };
 use webrender_api::{DocumentId, ImageKey};
 use webvr_traits::{WebVRGamepadData, WebVRGamepadHand, WebVRGamepadState};
@@ -172,6 +174,8 @@ unsafe_no_jsmanaged_fields!(MessagePortImpl);
 unsafe_no_jsmanaged_fields!(MessagePortId);
 unsafe_no_jsmanaged_fields!(RefCell<Option<MessagePortId>>);
 unsafe_no_jsmanaged_fields!(MessagePortRouterId);
+
+unsafe_no_jsmanaged_fields!(BroadcastChannelRouterId);
 
 unsafe_no_jsmanaged_fields!(BlobId);
 unsafe_no_jsmanaged_fields!(BlobImpl);
@@ -530,10 +534,17 @@ unsafe_no_jsmanaged_fields!(RefCell<Option<WebGPU>>);
 unsafe_no_jsmanaged_fields!(RefCell<Identities>);
 unsafe_no_jsmanaged_fields!(WebGPU);
 unsafe_no_jsmanaged_fields!(WebGPUAdapter);
-unsafe_no_jsmanaged_fields!(WebGPUDevice);
 unsafe_no_jsmanaged_fields!(WebGPUBuffer);
+unsafe_no_jsmanaged_fields!(WebGPUBindGroup);
 unsafe_no_jsmanaged_fields!(WebGPUBindGroupLayout);
+unsafe_no_jsmanaged_fields!(WebGPUComputePipeline);
 unsafe_no_jsmanaged_fields!(WebGPUPipelineLayout);
+unsafe_no_jsmanaged_fields!(WebGPUQueue);
+unsafe_no_jsmanaged_fields!(WebGPUShaderModule);
+unsafe_no_jsmanaged_fields!(WebGPUCommandBuffer);
+unsafe_no_jsmanaged_fields!(WebGPUCommandEncoder);
+unsafe_no_jsmanaged_fields!(WebGPUDevice);
+unsafe_no_jsmanaged_fields!(RefCell<Option<RawPass>>);
 unsafe_no_jsmanaged_fields!(GPUBufferState);
 unsafe_no_jsmanaged_fields!(WebXRSwapChainId);
 unsafe_no_jsmanaged_fields!(MediaList);
@@ -880,7 +891,11 @@ impl RootedTraceableSet {
     unsafe fn remove(traceable: *const dyn JSTraceable) {
         ROOTED_TRACEABLES.with(|ref traceables| {
             let mut traceables = traceables.borrow_mut();
-            let idx = match traceables.set.iter().rposition(|x| *x == traceable) {
+            let idx = match traceables
+                .set
+                .iter()
+                .rposition(|x| *x as *const () == traceable as *const ())
+            {
                 Some(idx) => idx,
                 None => unreachable!(),
             };
@@ -907,35 +922,6 @@ impl RootedTraceableSet {
 /// If you have GC things like *mut JSObject or JSVal, use rooted!.
 /// If you have an arbitrary number of DomObjects to root, use rooted_vec!.
 /// If you know what you're doing, use this.
-#[derive(JSTraceable)]
-pub struct RootedTraceable<'a, T: 'static + JSTraceable> {
-    ptr: &'a T,
-}
-
-impl<'a, T: JSTraceable + 'static> RootedTraceable<'a, T> {
-    /// DomRoot a JSTraceable thing for the life of this RootedTraceable
-    pub fn new(traceable: &'a T) -> RootedTraceable<'a, T> {
-        unsafe {
-            RootedTraceableSet::add(traceable);
-        }
-        RootedTraceable { ptr: traceable }
-    }
-}
-
-impl<'a, T: JSTraceable + 'static> Drop for RootedTraceable<'a, T> {
-    fn drop(&mut self) {
-        unsafe {
-            RootedTraceableSet::remove(self.ptr);
-        }
-    }
-}
-
-/// Roots any JSTraceable thing
-///
-/// If you have a valid DomObject, use DomRoot.
-/// If you have GC things like *mut JSObject or JSVal, use rooted!.
-/// If you have an arbitrary number of DomObjects to root, use rooted_vec!.
-/// If you know what you're doing, use this.
 #[unrooted_must_root_lint::allow_unrooted_interior]
 pub struct RootedTraceableBox<T: 'static + JSTraceable> {
     ptr: *mut T,
@@ -948,12 +934,12 @@ unsafe impl<T: JSTraceable + 'static> JSTraceable for RootedTraceableBox<T> {
 }
 
 impl<T: JSTraceable + 'static> RootedTraceableBox<T> {
-    /// DomRoot a JSTraceable thing for the life of this RootedTraceable
+    /// DomRoot a JSTraceable thing for the life of this RootedTraceableBox
     pub fn new(traceable: T) -> RootedTraceableBox<T> {
         Self::from_box(Box::new(traceable))
     }
 
-    /// Consumes a boxed JSTraceable and roots it for the life of this RootedTraceable.
+    /// Consumes a boxed JSTraceable and roots it for the life of this RootedTraceableBox.
     pub fn from_box(boxed_traceable: Box<T>) -> RootedTraceableBox<T> {
         let traceable = Box::into_raw(boxed_traceable);
         unsafe {

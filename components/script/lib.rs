@@ -2,7 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#![feature(box_into_raw_non_null)]
 #![feature(const_fn)]
+#![feature(const_transmute)]
 #![feature(core_intrinsics)]
 #![feature(drain_filter)]
 #![feature(inner_deref)]
@@ -64,8 +66,6 @@ pub mod document_loader;
 mod dom;
 #[warn(deprecated)]
 mod canvas_state;
-#[warn(deprecated)]
-mod compartments;
 mod euclidext;
 #[warn(deprecated)]
 pub mod fetch;
@@ -81,6 +81,8 @@ mod mem;
 mod microtask;
 #[warn(deprecated)]
 mod network_listener;
+#[warn(deprecated)]
+mod realms;
 #[warn(deprecated)]
 mod script_module;
 #[warn(deprecated)]

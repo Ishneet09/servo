@@ -21,14 +21,14 @@ pub mod serializable;
 pub mod transferable;
 pub mod webdriver_msg;
 
-use crate::serializable::BlobImpl;
+use crate::serializable::{BlobData, BlobImpl};
 use crate::transferable::MessagePortImpl;
 use crate::webdriver_msg::{LoadStatus, WebDriverScriptCommand};
 use bluetooth_traits::BluetoothRequest;
 use canvas_traits::webgl::WebGLPipeline;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, WorkerId};
-use embedder_traits::{Cursor, EventLoopWaker};
+use embedder_traits::EventLoopWaker;
 use euclid::{default::Point2D, Length, Rect, Scale, Size2D, UnknownUnit, Vector2D};
 use gfx_traits::Epoch;
 use http::HeaderMap;
@@ -44,7 +44,7 @@ use msg::constellation_msg::BackgroundHangMonitorRegister;
 use msg::constellation_msg::{
     BlobId, BrowsingContextId, HistoryStateId, MessagePortId, PipelineId,
 };
-use msg::constellation_msg::{PipelineNamespaceId, TopLevelBrowsingContextId, TraversalDirection};
+use msg::constellation_msg::{PipelineNamespaceId, TopLevelBrowsingContextId};
 use net_traits::image::base::Image;
 use net_traits::image_cache::ImageCache;
 use net_traits::request::Referrer;
@@ -62,7 +62,6 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 use style_traits::CSSPixel;
 use style_traits::SpeculativePainter;
 use webrender_api::units::{
@@ -125,7 +124,7 @@ pub enum LayoutControlMsg {
     /// Requests the current epoch (layout counter) from this layout.
     GetCurrentEpoch(IpcSender<Epoch>),
     /// Asks layout to run another step in its animation.
-    TickAnimations,
+    TickAnimations(ImmutableOrigin),
     /// Tells layout about the new scrolling offsets of each scrollable stacking context.
     SetScrollStates(Vec<ScrollState>),
     /// Requests the current load state of Web fonts. `true` is returned if fonts are still loading
@@ -645,7 +644,7 @@ pub struct InitialScriptState {
     /// A channel on which messages can be sent to the constellation from script.
     pub script_to_constellation_chan: ScriptToConstellationChan,
     /// A handle to register script-(and associated layout-)threads for hang monitoring.
-    pub background_hang_monitor_register: Box<dyn BackgroundHangMonitorRegister>,
+    pub background_hang_monitor_register: Option<Box<dyn BackgroundHangMonitorRegister>>,
     /// A sender for the layout thread to communicate to the constellation.
     pub layout_to_constellation_chan: IpcSender<LayoutMsg>,
     /// A channel to schedule timer events.
@@ -836,102 +835,6 @@ pub enum WebDriverCommandMsg {
     ),
 }
 
-/// Messages to the constellation.
-#[derive(Deserialize, Serialize)]
-pub enum ConstellationMsg {
-    /// Exit the constellation.
-    Exit,
-    /// Request that the constellation send the BrowsingContextId corresponding to the document
-    /// with the provided pipeline id
-    GetBrowsingContext(PipelineId, IpcSender<Option<BrowsingContextId>>),
-    /// Request that the constellation send the current pipeline id for the provided
-    /// browsing context id, over a provided channel.
-    GetPipeline(BrowsingContextId, IpcSender<Option<PipelineId>>),
-    /// Request that the constellation send the current focused top-level browsing context id,
-    /// over a provided channel.
-    GetFocusTopLevelBrowsingContext(IpcSender<Option<TopLevelBrowsingContextId>>),
-    /// Query the constellation to see if the current compositor output is stable
-    IsReadyToSaveImage(HashMap<PipelineId, Epoch>),
-    /// Inform the constellation of a key event.
-    Keyboard(KeyboardEvent),
-    /// Whether to allow script to navigate.
-    AllowNavigationResponse(PipelineId, bool),
-    /// Request to load a page.
-    LoadUrl(TopLevelBrowsingContextId, ServoUrl),
-    /// Request to traverse the joint session history of the provided browsing context.
-    TraverseHistory(TopLevelBrowsingContextId, TraversalDirection),
-    /// Inform the constellation of a window being resized.
-    WindowSize(
-        Option<TopLevelBrowsingContextId>,
-        WindowSizeData,
-        WindowSizeType,
-    ),
-    /// Requests that the constellation instruct layout to begin a new tick of the animation.
-    TickAnimation(PipelineId, AnimationTickType),
-    /// Dispatch a webdriver command
-    WebDriverCommand(WebDriverCommandMsg),
-    /// Reload a top-level browsing context.
-    Reload(TopLevelBrowsingContextId),
-    /// A log entry, with the top-level browsing context id and thread name
-    LogEntry(Option<TopLevelBrowsingContextId>, Option<String>, LogEntry),
-    /// Dispatch WebVR events to the subscribed script threads.
-    WebVREvents(Vec<PipelineId>, Vec<WebVREvent>),
-    /// Create a new top level browsing context.
-    NewBrowser(ServoUrl, TopLevelBrowsingContextId),
-    /// Close a top level browsing context.
-    CloseBrowser(TopLevelBrowsingContextId),
-    /// Panic a top level browsing context.
-    SendError(Option<TopLevelBrowsingContextId>, String),
-    /// Make browser visible.
-    SelectBrowser(TopLevelBrowsingContextId),
-    /// Forward an event to the script task of the given pipeline.
-    ForwardEvent(PipelineId, CompositorEvent),
-    /// Requesting a change to the onscreen cursor.
-    SetCursor(Cursor),
-    /// Enable the sampling profiler, with a given sampling rate and max total sampling duration.
-    EnableProfiler(Duration, Duration),
-    /// Disable the sampling profiler.
-    DisableProfiler,
-    /// Request to exit from fullscreen mode
-    ExitFullScreen(TopLevelBrowsingContextId),
-    /// Media session action.
-    MediaSessionAction(MediaSessionActionType),
-}
-
-impl fmt::Debug for ConstellationMsg {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        use self::ConstellationMsg::*;
-        let variant = match *self {
-            Exit => "Exit",
-            GetBrowsingContext(..) => "GetBrowsingContext",
-            GetPipeline(..) => "GetPipeline",
-            GetFocusTopLevelBrowsingContext(..) => "GetFocusTopLevelBrowsingContext",
-            IsReadyToSaveImage(..) => "IsReadyToSaveImage",
-            Keyboard(..) => "Keyboard",
-            AllowNavigationResponse(..) => "AllowNavigationResponse",
-            LoadUrl(..) => "LoadUrl",
-            TraverseHistory(..) => "TraverseHistory",
-            WindowSize(..) => "WindowSize",
-            TickAnimation(..) => "TickAnimation",
-            WebDriverCommand(..) => "WebDriverCommand",
-            Reload(..) => "Reload",
-            LogEntry(..) => "LogEntry",
-            WebVREvents(..) => "WebVREvents",
-            NewBrowser(..) => "NewBrowser",
-            CloseBrowser(..) => "CloseBrowser",
-            SendError(..) => "SendError",
-            SelectBrowser(..) => "SelectBrowser",
-            ForwardEvent(..) => "ForwardEvent",
-            SetCursor(..) => "SetCursor",
-            EnableProfiler(..) => "EnableProfiler",
-            DisableProfiler => "DisableProfiler",
-            ExitFullScreen(..) => "ExitFullScreen",
-            MediaSessionAction(..) => "MediaSessionAction",
-        };
-        write!(formatter, "ConstellationMsg::{}", variant)
-    }
-}
-
 /// Resources required by workerglobalscopes
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WorkerGlobalScopeInit {
@@ -1052,6 +955,48 @@ pub struct StructuredSerializedData {
     pub ports: Option<HashMap<MessagePortId, MessagePortImpl>>,
 }
 
+impl StructuredSerializedData {
+    /// Clone the serialized data for use with broadcast-channels.
+    pub fn clone_for_broadcast(&self) -> StructuredSerializedData {
+        let serialized = self.serialized.clone();
+
+        let blobs = if let Some(blobs) = self.blobs.as_ref() {
+            let mut blob_clones = HashMap::with_capacity(blobs.len());
+
+            for (original_id, blob) in blobs.iter() {
+                let type_string = blob.type_string();
+
+                if let BlobData::Memory(ref bytes) = blob.blob_data() {
+                    let blob_clone = BlobImpl::new_from_bytes(bytes.clone(), type_string);
+
+                    // Note: we insert the blob at the original id,
+                    // otherwise this will not match the storage key as serialized by SM in `serialized`.
+                    // The clone has it's own new Id however.
+                    blob_clones.insert(original_id.clone(), blob_clone);
+                } else {
+                    // Not panicking only because this is called from the constellation.
+                    warn!("Serialized blob not in memory format(should never happen).");
+                }
+            }
+            Some(blob_clones)
+        } else {
+            None
+        };
+
+        if self.ports.is_some() {
+            // Not panicking only because this is called from the constellation.
+            warn!("Attempt to broadcast structured serialized data including ports(should never happen).");
+        }
+
+        StructuredSerializedData {
+            serialized,
+            blobs,
+            // Ports cannot be broadcast.
+            ports: None,
+        }
+    }
+}
+
 /// A task on the https://html.spec.whatwg.org/multipage/#port-message-queue
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct PortMessageTask {
@@ -1074,6 +1019,27 @@ pub enum MessagePortMsg {
     RemoveMessagePort(MessagePortId),
     /// Handle a new port-message-task.
     NewTask(MessagePortId, PortMessageTask),
+}
+
+/// Message for communication between the constellation and a global managing broadcast channels.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BroadcastMsg {
+    /// The origin of this message.
+    pub origin: ImmutableOrigin,
+    /// The name of the channel.
+    pub channel_name: String,
+    /// A data-holder for serialized data.
+    pub data: StructuredSerializedData,
+}
+
+impl Clone for BroadcastMsg {
+    fn clone(&self) -> BroadcastMsg {
+        BroadcastMsg {
+            data: self.data.clone_for_broadcast(),
+            origin: self.origin.clone(),
+            channel_name: self.channel_name.clone(),
+        }
+    }
 }
 
 /// The type of MediaSession action.

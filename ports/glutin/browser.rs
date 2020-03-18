@@ -7,7 +7,10 @@ use crate::window_trait::{WindowPortsMethods, LINE_HEIGHT};
 use euclid::{Point2D, Vector2D};
 use keyboard_types::{Key, KeyboardEvent, Modifiers, ShortcutMatcher};
 use servo::compositing::windowing::{WebRenderDebugOption, WindowEvent};
-use servo::embedder_traits::{EmbedderMsg, FilterPattern};
+use servo::embedder_traits::{
+    EmbedderMsg, FilterPattern, PermissionRequest, PromptDefinition, PromptOrigin, PromptResult,
+    PermissionPrompt,
+};
 use servo::msg::constellation_msg::TopLevelBrowsingContextId as BrowserId;
 use servo::msg::constellation_msg::TraversalDirection;
 use servo::net_traits::pub_domains::is_reg_domain;
@@ -24,7 +27,7 @@ use std::mem;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
-use tinyfiledialogs::{self, MessageBoxIcon};
+use tinyfiledialogs::{self, MessageBoxIcon, OkCancel, YesNo};
 
 pub struct Browser<Window: WindowPortsMethods + ?Sized> {
     current_url: Option<ServoUrl>,
@@ -299,23 +302,78 @@ where
                 EmbedderMsg::ResizeTo(size) => {
                     self.window.set_inner_size(size);
                 },
-                EmbedderMsg::Alert(message, sender) => {
-                    if !opts::get().headless {
-                        let _ = thread::Builder::new()
+                EmbedderMsg::Prompt(definition, origin) => {
+                    let res = if opts::get().headless {
+                        match definition {
+                            PromptDefinition::Alert(_message, sender) => {
+                                sender.send(())
+                            }
+                            PromptDefinition::YesNo(_message, sender) => {
+                                sender.send(PromptResult::Primary)
+                            }
+                            PromptDefinition::OkCancel(_message, sender) => {
+                                sender.send(PromptResult::Primary)
+                            }
+                            PromptDefinition::Input(_message, default, sender) => {
+                                sender.send(Some(default.to_owned()))
+                            }
+                        }
+                    } else {
+                        thread::Builder::new()
                             .name("display alert dialog".to_owned())
                             .spawn(move || {
-                                tinyfiledialogs::message_box_ok(
-                                    "Alert!",
-                                    &tiny_dialog_escape(&message),
-                                    MessageBoxIcon::Warning,
-                                );
+                                match definition {
+                                    PromptDefinition::Alert(mut message, sender) => {
+                                        if origin == PromptOrigin::Untrusted {
+                                            message = tiny_dialog_escape(&message);
+                                        }
+                                        tinyfiledialogs::message_box_ok(
+                                            "Alert!",
+                                            &message,
+                                            MessageBoxIcon::Warning,
+                                        );
+                                        sender.send(())
+                                    }
+                                    PromptDefinition::YesNo(mut message, sender) => {
+                                        if origin == PromptOrigin::Untrusted {
+                                            message = tiny_dialog_escape(&message);
+                                        }
+                                        let result = tinyfiledialogs::message_box_yes_no(
+                                            "", &message, MessageBoxIcon::Warning, YesNo::No,
+                                        );
+                                        sender.send(match result {
+                                            YesNo::Yes => PromptResult::Primary,
+                                            YesNo::No => PromptResult::Secondary,
+                                        })
+                                    }
+                                    PromptDefinition::OkCancel(mut message, sender) => {
+                                        if origin == PromptOrigin::Untrusted {
+                                            message = tiny_dialog_escape(&message);
+                                        }
+                                        let result = tinyfiledialogs::message_box_ok_cancel(
+                                            "", &message, MessageBoxIcon::Warning, OkCancel::Cancel,
+                                        );
+                                        sender.send(match result {
+                                            OkCancel::Ok => PromptResult::Primary,
+                                            OkCancel::Cancel => PromptResult::Secondary,
+                                        })
+                                    }
+                                    PromptDefinition::Input(mut message, mut default, sender) => {
+                                        if origin == PromptOrigin::Untrusted {
+                                            message = tiny_dialog_escape(&message);
+                                            default = tiny_dialog_escape(&default);
+                                        }
+                                        let result = tinyfiledialogs::input_box("", &message, &default);
+                                        sender.send(result)
+                                    }
+                                }
                             })
                             .unwrap()
                             .join()
-                            .expect("Thread spawning failed");
-                    }
-                    if let Err(e) = sender.send(()) {
-                        let reason = format!("Failed to send Alert response: {}", e);
+                            .expect("Thread spawning failed")
+                    };
+                    if let Err(e) = res {
+                        let reason = format!("Failed to send Prompt response: {}", e);
                         self.event_queue
                             .push(WindowEvent::SendError(browser_id, reason));
                     }
@@ -436,6 +494,10 @@ where
                         self.event_queue.push(WindowEvent::SendError(None, reason));
                     };
                 },
+                EmbedderMsg::PromptPermission(prompt, sender) => {
+                    let permission_state = prompt_user(prompt);
+                    let _ = sender.send(permission_state);
+                }
                 EmbedderMsg::ShowIME(_kind) => {
                     debug!("ShowIME received");
                 },
@@ -453,9 +515,51 @@ where
                     debug!("MediaSessionEvent received");
                     // TODO(ferjm): MediaSession support for Glutin based browsers.
                 },
+                EmbedderMsg::OnDevtoolsStarted(port) => {
+                    match port {
+                        Ok(p) => info!("Devtools Server running on port {}", p),
+                        Err(()) => error!("Error running devtools server"),
+                    }
+                },
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn prompt_user(prompt: PermissionPrompt) -> PermissionRequest {
+    if opts::get().headless {
+        return PermissionRequest::Denied;
+    }
+
+    let message = match prompt {
+        PermissionPrompt::Request(permission_name) => {
+            format!("Do you want to grant permission for {:?}?", permission_name)
+        },
+        PermissionPrompt::Insecure(permission_name) => {
+            format!(
+                "The {:?} feature is only safe to use in secure context, but servo can't guarantee\n\
+                that the current context is secure. Do you want to proceed and grant permission?",
+                permission_name
+            )
+        },
+    };
+
+    match tinyfiledialogs::message_box_yes_no(
+        "Permission request dialog",
+        &message,
+        MessageBoxIcon::Question,
+        YesNo::No,
+    ) {
+        YesNo::Yes => PermissionRequest::Granted,
+        YesNo::No => PermissionRequest::Denied,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prompt_user(_prompt: PermissionPrompt) -> PermissionRequest {
+    // TODO popup only supported on linux
+    PermissionRequest::Denied
 }
 
 #[cfg(target_os = "linux")]

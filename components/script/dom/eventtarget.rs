@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::enter_realm;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::{CallbackContainer, CallbackFunction, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
@@ -34,11 +33,13 @@ use crate::dom::htmlformelement::FormControlElementHelpers;
 use crate::dom::node::document_from_node;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
+use crate::dom::workerglobalscope::WorkerGlobalScope;
+use crate::realms::{enter_realm, InRealm};
 use dom_struct::dom_struct;
 use fnv::FnvHasher;
-use js::jsapi::{JSAutoRealm, JSFunction, JS_GetFunctionObject, SourceText};
+use js::jsapi::{JS_GetFunctionObject, SourceText};
 use js::rust::wrappers::CompileFunction;
-use js::rust::{AutoObjectVectorWrapper, CompileOptionsWrapper};
+use js::rust::{CompileOptionsWrapper, RootedObjectVectorWrapper};
 use libc::c_char;
 use servo_atoms::Atom;
 use servo_url::ServoUrl;
@@ -50,7 +51,6 @@ use std::hash::BuildHasherDefault;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use std::ptr;
 use std::rc::Rc;
 
 #[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
@@ -72,7 +72,7 @@ impl CommonEventHandler {
     }
 }
 
-#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
+#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum ListenerPhase {
     Capturing,
     Bubbling,
@@ -152,9 +152,9 @@ pub enum CompiledEventListener {
 
 impl CompiledEventListener {
     // https://html.spec.whatwg.org/multipage/#the-event-handler-processing-algorithm
-    pub fn call_or_handle_event<T: DomObject>(
+    pub fn call_or_handle_event(
         &self,
-        object: &T,
+        object: &EventTarget,
         event: &Event,
         exception_handle: ExceptionHandling,
     ) {
@@ -167,27 +167,29 @@ impl CompiledEventListener {
                 match *handler {
                     CommonEventHandler::ErrorEventHandler(ref handler) => {
                         if let Some(event) = event.downcast::<ErrorEvent>() {
-                            let cx = object.global().get_cx();
-                            rooted!(in(*cx) let error = event.Error(cx));
-                            let return_value = handler.Call_(
-                                object,
-                                EventOrString::String(event.Message()),
-                                Some(event.Filename()),
-                                Some(event.Lineno()),
-                                Some(event.Colno()),
-                                Some(error.handle()),
-                                exception_handle,
-                            );
-                            // Step 4
-                            if let Ok(return_value) = return_value {
-                                rooted!(in(*cx) let return_value = return_value);
-                                if return_value.handle().is_boolean() &&
-                                    return_value.handle().to_boolean() == true
-                                {
-                                    event.upcast::<Event>().PreventDefault();
+                            if object.is::<Window>() || object.is::<WorkerGlobalScope>() {
+                                let cx = object.global().get_cx();
+                                rooted!(in(*cx) let error = event.Error(cx));
+                                let return_value = handler.Call_(
+                                    object,
+                                    EventOrString::String(event.Message()),
+                                    Some(event.Filename()),
+                                    Some(event.Lineno()),
+                                    Some(event.Colno()),
+                                    Some(error.handle()),
+                                    exception_handle,
+                                );
+                                // Step 4
+                                if let Ok(return_value) = return_value {
+                                    rooted!(in(*cx) let return_value = return_value);
+                                    if return_value.handle().is_boolean() &&
+                                        return_value.handle().to_boolean() == true
+                                    {
+                                        event.upcast::<Event>().PreventDefault();
+                                    }
                                 }
+                                return;
                             }
-                            return;
                         }
 
                         let _ = handler.Call_(
@@ -245,6 +247,8 @@ impl CompiledEventListener {
     }
 }
 
+// https://dom.spec.whatwg.org/#concept-event-listener
+// (as distinct from https://dom.spec.whatwg.org/#callbackdef-eventlistener)
 #[derive(Clone, DenyPublicFields, JSTraceable, MallocSizeOf)]
 /// A listener in a collection of event listeners.
 struct EventListenerEntry {
@@ -364,23 +368,13 @@ impl EventTarget {
             })
     }
 
-    pub fn dispatch_event_with_target(&self, target: &EventTarget, event: &Event) -> EventStatus {
-        if let Some(window) = target.global().downcast::<Window>() {
-            if window.has_document() {
-                assert!(window.Document().can_invoke_script());
-            }
-        };
-
-        event.dispatch(self, Some(target))
-    }
-
     pub fn dispatch_event(&self, event: &Event) -> EventStatus {
         if let Some(window) = self.global().downcast::<Window>() {
             if window.has_document() {
                 assert!(window.Document().can_invoke_script());
             }
         };
-        event.dispatch(self, None)
+        event.dispatch(self, false)
     }
 
     pub fn remove_all_listeners(&self) {
@@ -401,9 +395,15 @@ impl EventTarget {
         });
 
         match idx {
-            Some(idx) => {
-                entries[idx].listener =
-                    EventListenerType::Inline(listener.unwrap_or(InlineEventListener::Null));
+            Some(idx) => match listener {
+                // Replace if there's something to replace with,
+                // but remove entirely if there isn't.
+                Some(listener) => {
+                    entries[idx].listener = EventListenerType::Inline(listener);
+                },
+                None => {
+                    entries.remove(idx);
+                },
             },
             None => {
                 if let Some(listener) = listener {
@@ -490,9 +490,10 @@ impl EventTarget {
         // source text, we handle parse errors later
 
         // Step 3.8 TODO: settings objects not implemented
+        let window = document.window();
+        let _ac = enter_realm(&*window);
 
         // Step 3.9
-        let window = document.window();
 
         let url_serialized = CString::new(handler.url.to_string()).unwrap();
         let name = CString::new(&**ty).unwrap();
@@ -516,10 +517,12 @@ impl EventTarget {
         };
 
         let cx = window.get_cx();
-        let options = CompileOptionsWrapper::new(*cx, url_serialized.as_ptr(), handler.line as u32);
+        let options = unsafe {
+            CompileOptionsWrapper::new(*cx, url_serialized.as_ptr(), handler.line as u32)
+        };
 
         // Step 3.9, subsection Scope steps 1-6
-        let scopechain = AutoObjectVectorWrapper::new(*cx);
+        let scopechain = RootedObjectVectorWrapper::new(*cx);
 
         if let Some(element) = element {
             scopechain.append(document.reflector().get_jsobject().get());
@@ -529,12 +532,10 @@ impl EventTarget {
             scopechain.append(element.reflector().get_jsobject().get());
         }
 
-        let _ac = enter_realm(&*window); // TODO 3.8 should replace this
-        rooted!(in(*cx) let mut handler = ptr::null_mut::<JSFunction>());
-        let rv = unsafe {
+        rooted!(in(*cx) let mut handler = unsafe {
             CompileFunction(
                 *cx,
-                scopechain.ptr,
+                scopechain.handle(),
                 options.ptr,
                 name.as_ptr(),
                 args.len() as u32,
@@ -545,15 +546,14 @@ impl EventTarget {
                     ownsUnits_: false,
                     _phantom_0: PhantomData,
                 },
-                handler.handle_mut().into(),
             )
-        };
-        if !rv || handler.get().is_null() {
+        });
+        if handler.get().is_null() {
             // Step 3.7
             unsafe {
-                let _ac = JSAutoRealm::new(*cx, self.reflector().get_jsobject().get());
+                let ar = enter_realm(&*self);
                 // FIXME(#13152): dispatch error event.
-                report_pending_exception(*cx, false);
+                report_pending_exception(*cx, false, InRealm::Entered(&ar));
             }
             return None;
         }

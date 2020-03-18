@@ -11,7 +11,6 @@ use crate::values::specified::length::Length as SpecifiedLength;
 use crate::values::specified::length::LengthPercentage as SpecifiedLengthPercentage;
 use crate::values::{computed, CSSFloat};
 use crate::Zero;
-use app_units::Au;
 use euclid;
 use euclid::default::{Rect, Transform3D};
 use std::fmt::{self, Write};
@@ -23,8 +22,10 @@ use style_traits::{CssWriter, ToCss};
     Clone,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToComputedValue,
     ToCss,
@@ -51,8 +52,10 @@ pub use self::GenericMatrix as Matrix;
     Clone,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToComputedValue,
     ToCss,
@@ -141,8 +144,10 @@ fn is_same<N: PartialEq>(x: &N, y: &N) -> bool {
 #[derive(
     Clone,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToComputedValue,
     ToCss,
@@ -267,8 +272,10 @@ pub use self::GenericTransformOperation as TransformOperation;
 #[derive(
     Clone,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToComputedValue,
     ToCss,
@@ -321,7 +328,7 @@ where
 /// Convert a length type into the absolute lengths.
 pub trait ToAbsoluteLength {
     /// Returns the absolute length as pixel value.
-    fn to_pixel_length(&self, containing_len: Option<Au>) -> Result<CSSFloat, ()>;
+    fn to_pixel_length(&self, containing_len: Option<ComputedLength>) -> Result<CSSFloat, ()>;
 }
 
 impl ToAbsoluteLength for SpecifiedLength {
@@ -329,7 +336,7 @@ impl ToAbsoluteLength for SpecifiedLength {
     // parsing a transform list of DOMMatrix because we want to return a DOM Exception
     // if there is relative length.
     #[inline]
-    fn to_pixel_length(&self, _containing_len: Option<Au>) -> Result<CSSFloat, ()> {
+    fn to_pixel_length(&self, _containing_len: Option<ComputedLength>) -> Result<CSSFloat, ()> {
         match *self {
             SpecifiedLength::NoCalc(len) => len.to_computed_pixel_length_without_context(),
             SpecifiedLength::Calc(ref calc) => calc.to_computed_pixel_length_without_context(),
@@ -342,7 +349,7 @@ impl ToAbsoluteLength for SpecifiedLengthPercentage {
     // parsing a transform list of DOMMatrix because we want to return a DOM Exception
     // if there is relative length.
     #[inline]
-    fn to_pixel_length(&self, _containing_len: Option<Au>) -> Result<CSSFloat, ()> {
+    fn to_pixel_length(&self, _containing_len: Option<ComputedLength>) -> Result<CSSFloat, ()> {
         use self::SpecifiedLengthPercentage::*;
         match *self {
             Length(len) => len.to_computed_pixel_length_without_context(),
@@ -354,22 +361,22 @@ impl ToAbsoluteLength for SpecifiedLengthPercentage {
 
 impl ToAbsoluteLength for ComputedLength {
     #[inline]
-    fn to_pixel_length(&self, _containing_len: Option<Au>) -> Result<CSSFloat, ()> {
+    fn to_pixel_length(&self, _containing_len: Option<ComputedLength>) -> Result<CSSFloat, ()> {
         Ok(self.px())
     }
 }
 
 impl ToAbsoluteLength for ComputedLengthPercentage {
     #[inline]
-    fn to_pixel_length(&self, containing_len: Option<Au>) -> Result<CSSFloat, ()> {
+    fn to_pixel_length(&self, containing_len: Option<ComputedLength>) -> Result<CSSFloat, ()> {
         match containing_len {
-            Some(relative_len) => Ok(self.to_pixel_length(relative_len).px()),
+            Some(relative_len) => Ok(self.resolve(relative_len).px()),
             // If we don't have reference box, we cannot resolve the used value,
             // so only retrieve the length part. This will be used for computing
             // distance without any layout info.
             //
             // FIXME(emilio): This looks wrong.
-            None => Ok(self.length_component().px()),
+            None => Ok(self.resolve(Zero::zero()).px()),
         }
     }
 }
@@ -380,7 +387,10 @@ pub trait ToMatrix {
     fn is_3d(&self) -> bool;
 
     /// Return the equivalent 3d matrix.
-    fn to_3d_matrix(&self, reference_box: Option<&Rect<Au>>) -> Result<Transform3D<f64>, ()>;
+    fn to_3d_matrix(
+        &self,
+        reference_box: Option<&Rect<ComputedLength>>,
+    ) -> Result<Transform3D<f64>, ()>;
 }
 
 /// A little helper to deal with both specified and computed angles.
@@ -426,7 +436,10 @@ where
     /// However, for specified TransformOperation, we will return Err(()) if there is any relative
     /// lengths because the only caller, DOMMatrix, doesn't accept relative lengths.
     #[inline]
-    fn to_3d_matrix(&self, reference_box: Option<&Rect<Au>>) -> Result<Transform3D<f64>, ()> {
+    fn to_3d_matrix(
+        &self,
+        reference_box: Option<&Rect<ComputedLength>>,
+    ) -> Result<Transform3D<f64>, ()> {
         use self::TransformOperation::*;
         use std::f64;
 
@@ -529,7 +542,7 @@ impl<T: ToMatrix> Transform<T> {
     #[cfg_attr(rustfmt, rustfmt_skip)]
     pub fn to_transform_3d_matrix(
         &self,
-        reference_box: Option<&Rect<Au>>
+        reference_box: Option<&Rect<ComputedLength>>
     ) -> Result<(Transform3D<CSSFloat>, bool), ()> {
         let cast_3d_transform = |m: Transform3D<f64>| -> Transform3D<CSSFloat> {
             use std::{f32, f64};
@@ -549,7 +562,7 @@ impl<T: ToMatrix> Transform<T> {
     /// Same as Transform::to_transform_3d_matrix but a f64 version.
     pub fn to_transform_3d_matrix_f64(
         &self,
-        reference_box: Option<&Rect<Au>>,
+        reference_box: Option<&Rect<ComputedLength>>,
     ) -> Result<(Transform3D<f64>, bool), ()> {
         // We intentionally use Transform3D<f64> during computation to avoid error propagation
         // because using f32 to compute triangle functions (e.g. in create_rotation()) is not
@@ -611,8 +624,10 @@ pub fn get_normalized_vector_and_angle<T: Zero>(
     Clone,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedZero,
     ToComputedValue,
@@ -623,6 +638,7 @@ pub fn get_normalized_vector_and_angle<T: Zero>(
 /// A value of the `Rotate` property
 ///
 /// <https://drafts.csswg.org/css-transforms-2/#individual-transforms>
+/// cbindgen:private-default-tagged-enum-constructor=false
 pub enum GenericRotate<Number, Angle> {
     /// 'none'
     None,
@@ -685,8 +701,10 @@ where
     Clone,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedZero,
     ToComputedValue,
@@ -697,6 +715,7 @@ where
 /// A value of the `Scale` property
 ///
 /// <https://drafts.csswg.org/css-transforms-2/#individual-transforms>
+/// cbindgen:private-default-tagged-enum-constructor=false
 pub enum GenericScale<Number> {
     /// 'none'
     None,
@@ -749,8 +768,10 @@ fn y_axis_and_z_axis_are_zero<LengthPercentage: Zero, Length: Zero>(
 #[derive(
     Clone,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedZero,
     ToComputedValue,
@@ -772,6 +793,7 @@ fn y_axis_and_z_axis_are_zero<LengthPercentage: Zero, Length: Zero>(
 /// https://github.com/w3c/csswg-drafts/issues/3305
 ///
 /// <https://drafts.csswg.org/css-transforms-2/#individual-transforms>
+/// cbindgen:private-default-tagged-enum-constructor=false
 pub enum GenericTranslate<LengthPercentage, Length>
 where
     LengthPercentage: Zero,
@@ -803,9 +825,8 @@ pub use self::GenericTranslate as Translate;
     ToResolvedValue,
     ToShmem,
 )]
+#[repr(u8)]
 pub enum TransformStyle {
-    #[cfg(feature = "servo")]
-    Auto,
     Flat,
     #[css(keyword = "preserve-3d")]
     Preserve3d,

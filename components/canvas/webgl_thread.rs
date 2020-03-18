@@ -13,6 +13,7 @@ use canvas_traits::webgl::DOMToTextureCommand;
 use canvas_traits::webgl::GLContextAttributes;
 use canvas_traits::webgl::GLLimits;
 use canvas_traits::webgl::GlType;
+use canvas_traits::webgl::InternalFormatIntVec;
 use canvas_traits::webgl::ProgramLinkInfo;
 use canvas_traits::webgl::SwapChainId;
 use canvas_traits::webgl::TexDataType;
@@ -54,7 +55,7 @@ use sparkle::gl::GLint;
 use sparkle::gl::GLuint;
 use sparkle::gl::Gl;
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::slice;
 use std::sync::{Arc, Mutex};
@@ -70,10 +71,16 @@ use surfman::GLVersion;
 use surfman::SurfaceAccess;
 use surfman::SurfaceInfo;
 use surfman::SurfaceType;
-use surfman_chains::SwapChains;
+use surfman_chains::{SurfmanProvider, SwapChains};
 use surfman_chains_api::SwapChainsAPI;
 use webrender_traits::{WebrenderExternalImageRegistry, WebrenderImageHandlerType};
+use webxr_api::SessionId;
 use webxr_api::SwapChainId as WebXRSwapChainId;
+
+#[cfg(feature = "xr-profile")]
+fn to_ms(ns: u64) -> f64 {
+    ns as f64 / 1_000_000.
+}
 
 struct GLContextData {
     ctx: Context,
@@ -133,25 +140,29 @@ pub(crate) struct WebGLThread {
     /// We use it to get an unique ID for new WebGLContexts.
     external_images: Arc<Mutex<WebrenderExternalImageRegistry>>,
     /// The receiver that will be used for processing WebGL messages.
-    receiver: WebGLReceiver<WebGLMsg>,
+    receiver: crossbeam_channel::Receiver<WebGLMsg>,
     /// The receiver that should be used to send WebGL messages for processing.
     sender: WebGLSender<WebGLMsg>,
     /// The swap chains used by webrender
     webrender_swap_chains: SwapChains<WebGLContextId>,
     /// The swap chains used by webxr
     webxr_swap_chains: SwapChains<WebXRSwapChainId>,
+    /// The set of all surface providers corresponding to WebXR sessions.
+    webxr_surface_providers: SurfaceProviders,
+    /// A channel to allow arbitrary threads to execute tasks that run in the WebGL thread.
+    runnable_receiver: crossbeam_channel::Receiver<WebGlRunnable>,
     /// Whether this context is a GL or GLES context.
     api_type: gl::GlType,
 }
 
-#[derive(PartialEq)]
-enum EventLoop {
-    Blocking,
-    Nonblocking,
-}
+pub type WebGlExecutor = crossbeam_channel::Sender<WebGlRunnable>;
+pub type WebGlRunnable = Box<dyn FnOnce() + Send>;
+pub type SurfaceProviders = Arc<Mutex<HashMap<SessionId, SurfaceProvider>>>;
+pub type SurfaceProvider = Box<dyn surfman_chains::SurfaceProvider + Send>;
 
 /// The data required to initialize an instance of the WebGLThread type.
 pub(crate) struct WebGLThreadInit {
+    pub webxr_surface_providers: SurfaceProviders,
     pub webrender_api_sender: webrender_api::RenderApiSender,
     pub webvr_compositor: Option<Box<dyn WebVRRenderHandler>>,
     pub external_images: Arc<Mutex<WebrenderExternalImageRegistry>>,
@@ -162,37 +173,7 @@ pub(crate) struct WebGLThreadInit {
     pub connection: Connection,
     pub adapter: Adapter,
     pub api_type: gl::GlType,
-}
-
-/// The extra data required to run an instance of WebGLThread when it is
-/// not running in its own thread.
-pub struct WebGLMainThread {
-    pub(crate) thread_data: RefCell<WebGLThread>,
-    shut_down: Cell<bool>,
-}
-
-impl WebGLMainThread {
-    /// Synchronously process all outstanding WebGL messages.
-    pub fn process(&self) {
-        if self.shut_down.get() {
-            return;
-        }
-
-        // Any context could be current when we start.
-        self.thread_data.borrow_mut().bound_context_id = None;
-        let result = self
-            .thread_data
-            .borrow_mut()
-            .process(EventLoop::Nonblocking);
-        if !result {
-            self.shut_down.set(true);
-            WEBGL_MAIN_THREAD.with(|thread_data| thread_data.borrow_mut().take());
-        }
-    }
-}
-
-thread_local! {
-    static WEBGL_MAIN_THREAD: RefCell<Option<Rc<WebGLMainThread>>> = RefCell::new(None);
+    pub runnable_receiver: crossbeam_channel::Receiver<WebGlRunnable>,
 }
 
 // A size at which it should be safe to create GL contexts
@@ -209,9 +190,11 @@ impl WebGLThread {
             receiver,
             webrender_swap_chains,
             webxr_swap_chains,
+            webxr_surface_providers,
             connection,
             adapter,
             api_type,
+            runnable_receiver,
         }: WebGLThreadInit,
     ) -> Self {
         WebGLThread {
@@ -224,9 +207,11 @@ impl WebGLThread {
             dom_outputs: Default::default(),
             external_images,
             sender,
-            receiver,
+            receiver: receiver.into_inner(),
             webrender_swap_chains,
             webxr_swap_chains,
+            webxr_surface_providers,
+            runnable_receiver,
             api_type,
         }
     }
@@ -238,23 +223,35 @@ impl WebGLThread {
             .name("WebGL thread".to_owned())
             .spawn(move || {
                 let mut data = WebGLThread::new(init);
-                data.process(EventLoop::Blocking);
+                data.process();
             })
             .expect("Thread spawning failed");
     }
 
-    fn process(&mut self, loop_type: EventLoop) -> bool {
+    fn process(&mut self) {
         let webgl_chan = WebGLChan(self.sender.clone());
-        while let Ok(msg) = match loop_type {
-            EventLoop::Blocking => self.receiver.recv(),
-            EventLoop::Nonblocking => self.receiver.try_recv(),
-        } {
-            let exit = self.handle_msg(msg, &webgl_chan);
-            if exit {
-                return false;
+        loop {
+            crossbeam_channel::select! {
+                recv(self.receiver) -> msg => {
+                    match msg {
+                        Ok(msg) => {
+                            let exit = self.handle_msg(msg, &webgl_chan);
+                            if exit {
+                                return;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                recv(self.runnable_receiver) -> msg => {
+                    if let Ok(msg) = msg {
+                        msg();
+                    } else {
+                        self.runnable_receiver = crossbeam_channel::never();
+                    }
+                }
             }
         }
-        true
     }
 
     /// Handles a generic WebGLMsg message
@@ -326,11 +323,11 @@ impl WebGLThread {
             WebGLMsg::WebVRCommand(ctx_id, command) => {
                 self.handle_webvr_command(ctx_id, command);
             },
-            WebGLMsg::CreateWebXRSwapChain(ctx_id, size, sender) => {
-                let _ = sender.send(self.create_webxr_swap_chain(ctx_id, size));
+            WebGLMsg::CreateWebXRSwapChain(ctx_id, size, sender, id) => {
+                let _ = sender.send(self.create_webxr_swap_chain(ctx_id, size, id));
             },
-            WebGLMsg::SwapBuffers(swap_ids, sender) => {
-                self.handle_swap_buffers(swap_ids, sender);
+            WebGLMsg::SwapBuffers(swap_ids, sender, sent_time) => {
+                self.handle_swap_buffers(swap_ids, sender, sent_time);
             },
             WebGLMsg::DOMToTextureCommand(command) => {
                 self.handle_dom_to_texture(command);
@@ -438,6 +435,7 @@ impl WebGLThread {
             size: safe_size.to_i32(),
         };
         let surface_access = self.surface_access();
+        let surface_provider = Box::new(SurfmanProvider::new(surface_access));
 
         let mut ctx = self
             .device
@@ -464,7 +462,7 @@ impl WebGLThread {
         );
 
         self.webrender_swap_chains
-            .create_attached_swap_chain(id, &mut self.device, &mut ctx, surface_access)
+            .create_attached_swap_chain(id, &mut self.device, &mut ctx, surface_provider)
             .expect("Failed to create the swap chain");
 
         let swap_chain = self
@@ -667,8 +665,16 @@ impl WebGLThread {
     fn handle_swap_buffers(
         &mut self,
         swap_ids: Vec<SwapChainId>,
-        completed_sender: WebGLSender<()>,
+        completed_sender: WebGLSender<u64>,
+        _sent_time: u64,
     ) {
+        #[cfg(feature = "xr-profile")]
+        let start_swap = time::precise_time_ns();
+        #[cfg(feature = "xr-profile")]
+        println!(
+            "WEBXR PROFILING [swap request]:\t{}ms",
+            to_ms(start_swap - _sent_time)
+        );
         debug!("handle_swap_buffers()");
         for swap_id in swap_ids {
             let context_id = swap_id.context_id();
@@ -733,7 +739,17 @@ impl WebGLThread {
             );
         }
 
-        completed_sender.send(()).unwrap();
+        #[allow(unused)]
+        let mut end_swap = 0;
+        #[cfg(feature = "xr-profile")]
+        {
+            end_swap = time::precise_time_ns();
+            println!(
+                "WEBXR PROFILING [swap buffer]:\t{}ms",
+                to_ms(end_swap - start_swap)
+            );
+        }
+        completed_sender.send(end_swap).unwrap();
     }
 
     /// Creates a new WebXR swap chain
@@ -742,6 +758,7 @@ impl WebGLThread {
         &mut self,
         context_id: WebGLContextId,
         size: Size2D<i32>,
+        session_id: SessionId,
     ) -> Option<WebXRSwapChainId> {
         debug!("WebGLThread::create_webxr_swap_chain()");
         let id = WebXRSwapChainId::new();
@@ -752,8 +769,14 @@ impl WebGLThread {
             &mut self.contexts,
             &mut self.bound_context_id,
         )?;
+        let surface_provider = self
+            .webxr_surface_providers
+            .lock()
+            .unwrap()
+            .remove(&session_id)
+            .unwrap_or_else(|| Box::new(SurfmanProvider::new(surface_access)));
         self.webxr_swap_chains
-            .create_detached_swap_chain(id, size, &mut self.device, &mut data.ctx, surface_access)
+            .create_detached_swap_chain(id, size, &mut self.device, &mut data.ctx, surface_provider)
             .ok()?;
         debug!("Created swap chain {:?}", id);
         Some(id)
@@ -922,13 +945,14 @@ impl WebGLThread {
 
     /// Helper function to create a `webrender_api::ImageDescriptor`.
     fn image_descriptor(size: Size2D<i32>, alpha: bool) -> webrender_api::ImageDescriptor {
+        let mut flags = webrender_api::ImageDescriptorFlags::empty();
+        flags.set(webrender_api::ImageDescriptorFlags::IS_OPAQUE, !alpha);
         webrender_api::ImageDescriptor {
             size: webrender_api::units::DeviceIntSize::new(size.width, size.height),
             stride: None,
             format: webrender_api::ImageFormat::BGRA8,
             offset: 0,
-            is_opaque: !alpha,
-            allow_mipmaps: false,
+            flags,
         }
     }
 
@@ -1188,6 +1212,13 @@ impl WebGLImpl {
             WebGLCommand::RenderbufferStorage(target, format, width, height) => {
                 gl.renderbuffer_storage(target, format, width, height)
             },
+            WebGLCommand::RenderbufferStorageMultisample(
+                target,
+                samples,
+                format,
+                width,
+                height,
+            ) => gl.renderbuffer_storage_multisample(target, samples, format, width, height),
             WebGLCommand::SampleCoverage(value, invert) => gl.sample_coverage(value, invert),
             WebGLCommand::Scissor(x, y, width, height) => {
                 // FIXME(nox): Kinda unfortunate that some u32 values could
@@ -1263,6 +1294,12 @@ impl WebGLImpl {
                 Self::shader_precision_format(gl, shader_type, precision_type, chan)
             },
             WebGLCommand::GetExtensions(ref chan) => Self::get_extensions(gl, chan),
+            WebGLCommand::GetFragDataLocation(program_id, ref name, ref sender) => {
+                let location =
+                    gl.get_frag_data_location(program_id.get(), &to_name_in_compiled_shader(name));
+                assert!(location >= 0);
+                sender.send(location).unwrap();
+            },
             WebGLCommand::GetUniformLocation(program_id, ref name, ref chan) => {
                 Self::uniform_location(gl, program_id, &name, chan)
             },
@@ -1637,6 +1674,29 @@ impl WebGLImpl {
                     .send(gl.get_tex_parameter_iv(target, param as u32))
                     .unwrap();
             },
+            WebGLCommand::GetInternalFormatIntVec(target, internal_format, param, ref sender) => {
+                match param {
+                    InternalFormatIntVec::Samples => {
+                        let mut count = [0; 1];
+                        gl.get_internal_format_iv(
+                            target,
+                            internal_format,
+                            gl::NUM_SAMPLE_COUNTS,
+                            &mut count,
+                        );
+                        assert!(count[0] >= 0);
+
+                        let mut values = vec![0; count[0] as usize];
+                        gl.get_internal_format_iv(
+                            target,
+                            internal_format,
+                            param as u32,
+                            &mut values,
+                        );
+                        sender.send(values).unwrap()
+                    },
+                }
+            },
             WebGLCommand::TexParameteri(target, param, value) => {
                 gl.tex_parameter_i(target, param as u32, value)
             },
@@ -1933,6 +1993,39 @@ impl WebGLImpl {
                 offset as isize,
                 size as isize,
             ),
+            WebGLCommand::ClearBufferfv(buffer, draw_buffer, ref value) => {
+                gl.clear_buffer_fv(buffer, draw_buffer, value)
+            },
+            WebGLCommand::ClearBufferiv(buffer, draw_buffer, ref value) => {
+                gl.clear_buffer_iv(buffer, draw_buffer, value)
+            },
+            WebGLCommand::ClearBufferuiv(buffer, draw_buffer, ref value) => {
+                gl.clear_buffer_uiv(buffer, draw_buffer, value)
+            },
+            WebGLCommand::ClearBufferfi(buffer, draw_buffer, depth, stencil) => {
+                gl.clear_buffer_fi(buffer, draw_buffer, depth, stencil)
+            },
+            WebGLCommand::InvalidateFramebuffer(target, ref attachments) => {
+                gl.invalidate_framebuffer(target, attachments)
+            },
+            WebGLCommand::InvalidateSubFramebuffer(target, ref attachments, x, y, w, h) => {
+                gl.invalidate_sub_framebuffer(target, attachments, x, y, w, h)
+            },
+            WebGLCommand::FramebufferTextureLayer(target, attachment, tex_id, level, layer) => {
+                let tex_id = tex_id.map_or(0, WebGLTextureId::get);
+                let attach = |attachment| {
+                    gl.framebuffer_texture_layer(target, attachment, tex_id, level, layer)
+                };
+
+                if attachment == gl::DEPTH_STENCIL_ATTACHMENT {
+                    attach(gl::DEPTH_ATTACHMENT);
+                    attach(gl::STENCIL_ATTACHMENT);
+                } else {
+                    attach(attachment)
+                }
+            },
+            WebGLCommand::ReadBuffer(buffer) => gl.read_buffer(buffer),
+            WebGLCommand::DrawBuffers(ref buffers) => gl.draw_buffers(buffers),
         }
 
         // If debug asertions are enabled, then check the error state.

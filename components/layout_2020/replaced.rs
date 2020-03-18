@@ -2,22 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::context::LayoutContext;
 use crate::dom_traversal::NodeExt;
-use crate::fragments::{Fragment, ImageFragment};
+use crate::fragments::{DebugId, Fragment, ImageFragment};
 use crate::geom::flow_relative::{Rect, Vec2};
-use crate::geom::physical;
+use crate::geom::PhysicalSize;
 use crate::sizing::ContentSizes;
 use crate::style_ext::ComputedValuesExt;
 use crate::ContainingBlock;
+use canvas_traits::canvas::{CanvasId, CanvasMsg, FromLayoutMsg};
+use ipc_channel::ipc::{self, IpcSender};
 use net_traits::image::base::Image;
+use net_traits::image_cache::{ImageOrMetadataAvailable, UsePlaceholder};
 use servo_arc::Arc as ServoArc;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 use style::properties::ComputedValues;
+use style::servo::url::ComputedUrl;
 use style::values::computed::{Length, LengthOrAuto};
 use style::values::CSSFloat;
 use style::Zero;
+use webrender_api::ImageKey;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub(crate) struct ReplacedContent {
     pub kind: ReplacedContentKind,
     intrinsic: IntrinsicSizes,
@@ -34,29 +41,98 @@ pub(crate) struct ReplacedContent {
 ///
 /// * For SVG, see https://svgwg.org/svg2-draft/coords.html#SizingSVGInCSS
 ///   and again https://github.com/w3c/csswg-drafts/issues/4572.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub(crate) struct IntrinsicSizes {
     pub width: Option<Length>,
     pub height: Option<Length>,
     pub ratio: Option<CSSFloat>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize)]
+pub(crate) enum CanvasSource {
+    WebGL(ImageKey),
+    Image(Option<Arc<Mutex<IpcSender<CanvasMsg>>>>),
+}
+
+impl fmt::Debug for CanvasSource {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match *self {
+                CanvasSource::WebGL(_) => "WebGL",
+                CanvasSource::Image(_) => "Image",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CanvasInfo {
+    pub source: CanvasSource,
+    pub canvas_id: CanvasId,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) enum ReplacedContentKind {
     Image(Option<Arc<Image>>),
+    Canvas(CanvasInfo),
 }
 
 impl ReplacedContent {
     pub fn for_element<'dom>(element: impl NodeExt<'dom>) -> Option<Self> {
-        if let Some((image, intrinsic_size_in_dots)) = element.as_image() {
-            // FIXME: should 'image-resolution' (when implemented) be used *instead* of
-            // `script::dom::htmlimageelement::ImageRequest::current_pixel_density`?
+        let (kind, intrinsic_size_in_dots) = {
+            if let Some((image, intrinsic_size_in_dots)) = element.as_image() {
+                (ReplacedContentKind::Image(image), intrinsic_size_in_dots)
+            } else if let Some((canvas_info, intrinsic_size_in_dots)) = element.as_canvas() {
+                (
+                    ReplacedContentKind::Canvas(canvas_info),
+                    intrinsic_size_in_dots,
+                )
+            } else {
+                return None;
+            }
+        };
 
-            // https://drafts.csswg.org/css-images-4/#the-image-resolution
-            let dppx = 1.0;
+        // FIXME: should 'image-resolution' (when implemented) be used *instead* of
+        // `script::dom::htmlimageelement::ImageRequest::current_pixel_density`?
 
-            let width = (intrinsic_size_in_dots.x as CSSFloat) / dppx;
-            let height = (intrinsic_size_in_dots.y as CSSFloat) / dppx;
+        // https://drafts.csswg.org/css-images-4/#the-image-resolution
+        let dppx = 1.0;
+
+        let width = (intrinsic_size_in_dots.width as CSSFloat) / dppx;
+        let height = (intrinsic_size_in_dots.height as CSSFloat) / dppx;
+        return Some(Self {
+            kind,
+            intrinsic: IntrinsicSizes {
+                width: Some(Length::new(width)),
+                height: Some(Length::new(height)),
+                // FIXME https://github.com/w3c/csswg-drafts/issues/4572
+                ratio: Some(width / height),
+            },
+        });
+    }
+
+    pub fn from_image_url<'dom>(
+        element: impl NodeExt<'dom>,
+        context: &LayoutContext,
+        image_url: &ComputedUrl,
+    ) -> Option<Self> {
+        if let ComputedUrl::Valid(image_url) = image_url {
+            let (image, width, height) = match context.get_or_request_image_or_meta(
+                element.as_opaque(),
+                image_url.clone(),
+                UsePlaceholder::No,
+            ) {
+                Some(ImageOrMetadataAvailable::ImageAvailable(image, _)) => {
+                    (Some(image.clone()), image.width as f32, image.height as f32)
+                },
+                Some(ImageOrMetadataAvailable::MetadataAvailable(metadata)) => {
+                    (None, metadata.width as f32, metadata.height as f32)
+                },
+                None => return None,
+            };
+
             return Some(Self {
                 kind: ReplacedContentKind::Image(image),
                 intrinsic: IntrinsicSizes {
@@ -71,11 +147,8 @@ impl ReplacedContent {
     }
 
     fn flow_relative_intrinsic_size(&self, style: &ComputedValues) -> Vec2<Option<Length>> {
-        let intrinsic_size = physical::Vec2 {
-            x: self.intrinsic.width,
-            y: self.intrinsic.height,
-        };
-        intrinsic_size.size_to_flow_relative(style.writing_mode)
+        let intrinsic_size = PhysicalSize::new(self.intrinsic.width, self.intrinsic.height);
+        Vec2::from_physical_size(&intrinsic_size, style.writing_mode)
     }
 
     fn inline_size_over_block_size_intrinsic_ratio(
@@ -116,6 +189,7 @@ impl ReplacedContent {
                 .and_then(|image| image.id)
                 .map(|image_key| {
                     Fragment::Image(ImageFragment {
+                        debug_id: DebugId::new(),
                         style: style.clone(),
                         rect: Rect {
                             start_corner: Vec2::zero(),
@@ -126,6 +200,34 @@ impl ReplacedContent {
                 })
                 .into_iter()
                 .collect(),
+            ReplacedContentKind::Canvas(canvas_info) => {
+                let image_key = match canvas_info.source {
+                    CanvasSource::WebGL(image_key) => image_key,
+                    CanvasSource::Image(ref ipc_renderer) => match *ipc_renderer {
+                        Some(ref ipc_renderer) => {
+                            let ipc_renderer = ipc_renderer.lock().unwrap();
+                            let (sender, receiver) = ipc::channel().unwrap();
+                            ipc_renderer
+                                .send(CanvasMsg::FromLayout(
+                                    FromLayoutMsg::SendData(sender),
+                                    canvas_info.canvas_id,
+                                ))
+                                .unwrap();
+                            receiver.recv().unwrap().image_key
+                        },
+                        None => return vec![],
+                    },
+                };
+                vec![Fragment::Image(ImageFragment {
+                    debug_id: DebugId::new(),
+                    style: style.clone(),
+                    rect: Rect {
+                        start_corner: Vec2::zero(),
+                        size,
+                    },
+                    image_key,
+                })]
+            },
         }
     }
 
@@ -158,11 +260,10 @@ impl ReplacedContent {
             //  the largest rectangle that has a 2:1 ratio and fits the device instead.”
             // “height of the largest rectangle that has a 2:1 ratio, has a height not greater
             //  than 150px, and has a width not greater than the device width.”
-            physical::Vec2 {
-                x: Length::new(300.),
-                y: Length::new(150.),
-            }
-            .size_to_flow_relative(mode)
+            Vec2::from_physical_size(
+                &PhysicalSize::new(Length::new(300.), Length::new(150.)),
+                mode,
+            )
         };
         let clamp = |inline_size: Length, block_size: Length| Vec2 {
             inline: inline_size.clamp_between_extremums(min_box_size.inline, max_box_size.inline),

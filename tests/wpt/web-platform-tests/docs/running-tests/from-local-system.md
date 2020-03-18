@@ -76,8 +76,8 @@ On Linux, macOS or other UNIX-like system:
 
 And on Windows (this must be run in a PowerShell session with Administrator privileges):
 
-```bash
-python wpt make-hosts-file | Out-File %SystemRoot%\System32\drivers\etc\hosts -Encoding ascii -Append
+```
+python wpt make-hosts-file | Out-File $env:SystemRoot\System32\drivers\etc\hosts -Encoding ascii -Append
 ```
 
 If you are behind a proxy, you also need to make sure the domains above are
@@ -116,7 +116,7 @@ http://web-platform.test:8000/tools/runner/index.html<br>
 https://web-platform.test:8443/tools/runner/index.html *
 
 This server has all the capabilities of the publicly-deployed version--see
-[Running the Tests from the Web](from-web).
+[Running the Tests from the Web](from-web.md).
 
 \**See [Trusting Root CA](../tools/certs/README.md)*
 
@@ -142,7 +142,7 @@ customising the test run:
     ./wpt run --help
 
 [A complete listing of the command-line arguments is available
-here](command-line-arguments).
+here](command-line-arguments.md).
 
 ```eval_rst
 .. toctree::

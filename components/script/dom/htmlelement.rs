@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::activation::{synthetic_click_activation, ActivationSource};
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
+use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::OnErrorEventHandlerNonNull;
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLLabelElementBinding::HTMLLabelElementMethods;
@@ -27,6 +27,7 @@ use crate::dom::htmlframesetelement::HTMLFrameSetElement;
 use crate::dom::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::htmlinputelement::{HTMLInputElement, InputType};
 use crate::dom::htmllabelelement::HTMLLabelElement;
+use crate::dom::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::node::{document_from_node, window_from_node};
 use crate::dom::node::{BindContext, Node, NodeFlags, ShadowIncluding};
 use crate::dom::text::Text;
@@ -170,6 +171,11 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#dom-hidden
     make_bool_setter!(SetHidden, "hidden");
 
+    // https://html.spec.whatwg.org/multipage/#the-dir-attribute
+    make_getter!(Dir, "dir");
+    // https://html.spec.whatwg.org/multipage/#the-dir-attribute
+    make_setter!(SetDir, "dir");
+
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers
     global_event_handlers!(NoOnload);
 
@@ -179,6 +185,35 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#dom-dataset
     fn Dataset(&self) -> DomRoot<DOMStringMap> {
         self.dataset.or_init(|| DOMStringMap::new(self))
+    }
+
+    // https://html.spec.whatwg.org/multipage/#handler-onerror
+    fn GetOnerror(&self) -> Option<Rc<OnErrorEventHandlerNonNull>> {
+        if self.is_body_or_frameset() {
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnerror()
+            } else {
+                None
+            }
+        } else {
+            self.upcast::<EventTarget>()
+                .get_event_handler_common("error")
+        }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#handler-onerror
+    fn SetOnerror(&self, listener: Option<Rc<OnErrorEventHandlerNonNull>>) {
+        if self.is_body_or_frameset() {
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnerror(listener)
+            }
+        } else {
+            // special setter for error
+            self.upcast::<EventTarget>()
+                .set_error_event_handler("error", listener)
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#handler-onload
@@ -206,34 +241,6 @@ impl HTMLElementMethods for HTMLElement {
         } else {
             self.upcast::<EventTarget>()
                 .set_event_handler_common("load", listener)
-        }
-    }
-
-    // https://html.spec.whatwg.org/multipage/#handler-onresize
-    fn GetOnresize(&self) -> Option<Rc<EventHandlerNonNull>> {
-        if self.is_body_or_frameset() {
-            let document = document_from_node(self);
-            if document.has_browsing_context() {
-                document.window().GetOnload()
-            } else {
-                None
-            }
-        } else {
-            self.upcast::<EventTarget>()
-                .get_event_handler_common("resize")
-        }
-    }
-
-    // https://html.spec.whatwg.org/multipage/#handler-onresize
-    fn SetOnresize(&self, listener: Option<Rc<EventHandlerNonNull>>) {
-        if self.is_body_or_frameset() {
-            let document = document_from_node(self);
-            if document.has_browsing_context() {
-                document.window().SetOnresize(listener);
-            }
-        } else {
-            self.upcast::<EventTarget>()
-                .set_event_handler_common("resize", listener)
         }
     }
 
@@ -290,6 +297,34 @@ impl HTMLElementMethods for HTMLElement {
         } else {
             self.upcast::<EventTarget>()
                 .set_event_handler_common("focus", listener)
+        }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#handler-onresize
+    fn GetOnresize(&self) -> Option<Rc<EventHandlerNonNull>> {
+        if self.is_body_or_frameset() {
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnresize()
+            } else {
+                None
+            }
+        } else {
+            self.upcast::<EventTarget>()
+                .get_event_handler_common("resize")
+        }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#handler-onresize
+    fn SetOnresize(&self, listener: Option<Rc<EventHandlerNonNull>>) {
+        if self.is_body_or_frameset() {
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnresize(listener)
+            }
+        } else {
+            self.upcast::<EventTarget>()
+                .set_event_handler_common("resize", listener)
         }
     }
 
@@ -359,16 +394,18 @@ impl HTMLElementMethods for HTMLElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-click
     fn Click(&self) {
-        if !self.upcast::<Element>().disabled_state() {
-            synthetic_click_activation(
-                self.upcast::<Element>(),
-                false,
-                false,
-                false,
-                false,
-                ActivationSource::FromClick,
-            )
+        let element = self.upcast::<Element>();
+        if element.disabled_state() {
+            return;
         }
+        if element.click_in_progress() {
+            return;
+        }
+        element.set_click_in_progress(true);
+
+        self.upcast::<Node>()
+            .fire_synthetic_mouse_event_not_trusted(DOMString::from("click"));
+        element.set_click_in_progress(false);
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-focus
@@ -515,6 +552,23 @@ impl HTMLElementMethods for HTMLElement {
 
         // Step 7.
         Node::replace_all(Some(fragment.upcast()), self.upcast::<Node>());
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-translate
+    fn Translate(&self) -> bool {
+        self.upcast::<Element>().is_translate_enabled()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-translate
+    fn SetTranslate(&self, yesno: bool) {
+        self.upcast::<Element>().set_string_attribute(
+            // TODO change this to local_name! when html5ever updates
+            &LocalName::from("translate"),
+            match yesno {
+                true => DOMString::from("yes"),
+                false => DOMString::from("no"),
+            },
+        );
     }
 }
 
@@ -718,6 +772,48 @@ impl HTMLElement {
                 _ => false,
             })
             .count() as u32
+    }
+
+    // https://html.spec.whatwg.org/multipage/#the-directionality.
+    // returns Some if can infer direction by itself or from child nodes
+    // returns None if requires to go up to parent
+    pub fn directionality(&self) -> Option<String> {
+        let element_direction: &str = &self.Dir();
+
+        if element_direction == "ltr" {
+            return Some("ltr".to_owned());
+        }
+
+        if element_direction == "rtl" {
+            return Some("rtl".to_owned());
+        }
+
+        if let Some(input) = self.downcast::<HTMLInputElement>() {
+            if input.input_type() == InputType::Tel {
+                return Some("ltr".to_owned());
+            }
+        }
+
+        if element_direction == "auto" {
+            if let Some(directionality) = self
+                .downcast::<HTMLInputElement>()
+                .and_then(|input| input.auto_directionality())
+            {
+                return Some(directionality);
+            }
+
+            if let Some(area) = self.downcast::<HTMLTextAreaElement>() {
+                return Some(area.auto_directionality());
+            }
+        }
+
+        // TODO(NeverHappened): Implement condition
+        // If the element's dir attribute is in the auto state OR
+        // If the element is a bdi element and the dir attribute is not in a defined state
+        // (i.e. it is not present or has an invalid value)
+        // Requires bdi element implementation (https://html.spec.whatwg.org/multipage/#the-bdi-element)
+
+        None
     }
 }
 

@@ -136,6 +136,9 @@ pub struct Opts {
     /// Whether we're running in multiprocess mode.
     pub multiprocess: bool,
 
+    /// Whether we want background hang monitor enabled or not
+    pub background_hang_monitor: bool,
+
     /// Whether we're running inside the sandbox.
     pub sandbox: bool,
 
@@ -480,28 +483,28 @@ enum UserAgent {
 fn default_user_agent_string(agent: UserAgent) -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     const DESKTOP_UA_STRING: &'static str =
-        "Mozilla/5.0 (X11; Linux x86_64; rv:63.0) Servo/1.0 Firefox/63.0";
+        "Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Servo/1.0 Firefox/72.0";
     #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
     const DESKTOP_UA_STRING: &'static str =
-        "Mozilla/5.0 (X11; Linux i686; rv:63.0) Servo/1.0 Firefox/63.0";
+        "Mozilla/5.0 (X11; Linux i686; rv:72.0) Servo/1.0 Firefox/72.0";
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     const DESKTOP_UA_STRING: &'static str =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Servo/1.0 Firefox/63.0";
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) Servo/1.0 Firefox/72.0";
     #[cfg(all(target_os = "windows", not(target_arch = "x86_64")))]
     const DESKTOP_UA_STRING: &'static str =
-        "Mozilla/5.0 (Windows NT 10.0; rv:63.0) Servo/1.0 Firefox/63.0";
+        "Mozilla/5.0 (Windows NT 10.0; rv:72.0) Servo/1.0 Firefox/72.0";
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     // Neither Linux nor Windows, so maybe OS X, and if not then OS X is an okay fallback.
     const DESKTOP_UA_STRING: &'static str =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:63.0) Servo/1.0 Firefox/63.0";
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:72.0) Servo/1.0 Firefox/72.0";
 
     match agent {
         UserAgent::Desktop => DESKTOP_UA_STRING,
-        UserAgent::Android => "Mozilla/5.0 (Android; Mobile; rv:63.0) Servo/1.0 Firefox/63.0",
+        UserAgent::Android => "Mozilla/5.0 (Android; Mobile; rv:68.0) Servo/1.0 Firefox/68.0",
         UserAgent::iOS => {
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 8_3 like Mac OS X; rv:63.0) Servo/1.0 Firefox/63.0"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 13_3 like Mac OS X; rv:72.0) Servo/1.0 Firefox/72.0"
         },
     }
 }
@@ -545,6 +548,7 @@ pub fn default_opts() -> Opts {
         initial_window_size: Size2D::new(1024, 740),
         user_agent: default_user_agent_string(DEFAULT_USER_AGENT).into(),
         multiprocess: false,
+        background_hang_monitor: false,
         random_pipeline_closure_probability: None,
         random_pipeline_closure_seed: None,
         sandbox: false,
@@ -649,12 +653,7 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         "Start remote debugger server on port",
         "2794",
     );
-    opts.optflagopt(
-        "",
-        "devtools",
-        "Start remote devtools server on port",
-        "6000",
-    );
+    opts.optflagopt("", "devtools", "Start remote devtools server on port", "0");
     opts.optflagopt(
         "",
         "webdriver",
@@ -669,6 +668,7 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         "NCSA Mosaic/1.0 (X11;SunOS 4.1.4 sun4m)",
     );
     opts.optflag("M", "multiprocess", "Run in multiprocess mode");
+    opts.optflag("B", "bhm", "Background Hang Monitor enabled");
     opts.optflag("S", "sandbox", "Run in a sandbox if multiprocess");
     opts.optopt(
         "",
@@ -881,7 +881,8 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
             })
         });
 
-    let devtools_port = opt_match.opt_default("devtools", "6000").map(|port| {
+    // Set default port 0 for a random port to be selected.
+    let devtools_port = opt_match.opt_default("devtools", "0").map(|port| {
         port.parse()
             .unwrap_or_else(|err| args_fail(&format!("Error parsing option: --devtools ({})", err)))
     });
@@ -965,6 +966,7 @@ pub fn from_cmdline_args(mut opts: Options, args: &[String]) -> ArgumentParsingR
         initial_window_size: initial_window_size,
         user_agent: user_agent,
         multiprocess: opt_match.opt_present("M"),
+        background_hang_monitor: opt_match.opt_present("B"),
         sandbox: opt_match.opt_present("S"),
         random_pipeline_closure_probability: random_pipeline_closure_probability,
         random_pipeline_closure_seed: random_pipeline_closure_seed,

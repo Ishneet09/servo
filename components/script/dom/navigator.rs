@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::compartments::InCompartment;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
 use crate::dom::bindings::error::Error;
@@ -21,7 +20,8 @@ use crate::dom::pluginarray::PluginArray;
 use crate::dom::promise::Promise;
 use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
 use crate::dom::window::Window;
-use crate::dom::xr::XR;
+use crate::dom::xrsystem::XRSystem;
+use crate::realms::InRealm;
 use dom_struct::dom_struct;
 use std::rc::Rc;
 
@@ -32,7 +32,7 @@ pub struct Navigator {
     plugins: MutNullableDom<PluginArray>,
     mime_types: MutNullableDom<MimeTypeArray>,
     service_worker: MutNullableDom<ServiceWorkerContainer>,
-    xr: MutNullableDom<XR>,
+    xr: MutNullableDom<XRSystem>,
     mediadevices: MutNullableDom<MediaDevices>,
     gamepads: MutNullableDom<GamepadList>,
     permissions: MutNullableDom<Permissions>,
@@ -172,8 +172,8 @@ impl NavigatorMethods for Navigator {
     }
 
     // https://w3c.github.io/webvr/spec/1.1/#navigator-getvrdisplays-attribute
-    fn GetVRDisplays(&self, comp: InCompartment) -> Rc<Promise> {
-        let promise = Promise::new_in_current_compartment(&self.global(), comp);
+    fn GetVRDisplays(&self, comp: InRealm) -> Rc<Promise> {
+        let promise = Promise::new_in_current_realm(&self.global(), comp);
         let displays = self.Xr().get_displays();
         match displays {
             Ok(displays) => promise.resolve_native(&displays),
@@ -183,8 +183,9 @@ impl NavigatorMethods for Navigator {
     }
 
     /// https://immersive-web.github.io/webxr/#dom-navigator-xr
-    fn Xr(&self) -> DomRoot<XR> {
-        self.xr.or_init(|| XR::new(&self.global()))
+    fn Xr(&self) -> DomRoot<XRSystem> {
+        self.xr
+            .or_init(|| XRSystem::new(&self.global().as_window()))
     }
 
     /// https://w3c.github.io/mediacapture-main/#dom-navigator-mediadevices

@@ -34,6 +34,9 @@ jobs:
   pool:
     vmImage: 'macOS-10.14'
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/affected_tests.yml
     parameters:
       artifactName: 'safari-preview-affected-tests'
@@ -48,6 +51,9 @@ jobs:
   pool:
     vmImage: 'macOS-10.14'
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/affected_tests.yml
     parameters:
       checkoutCommit: 'HEAD^1'
@@ -82,6 +88,9 @@ jobs:
   pool:
     vmImage: 'macOS-10.14'
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/pip_install.yml
     parameters:
@@ -111,12 +120,49 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.tools_unittest']
   pool:
     vmImage: 'macOS-10.14'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/
       toxenv: py27
+
+- job: tools_unittest_macOS_py3
+  displayName: 'tools/ unittests: macOS (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.tools_unittest']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/
+      toxenv: py36
+
+- job: tools_unittest_macOS_py38
+  displayName: 'tools/ unittests: macOS (Python 3.8)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.tools_unittest']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.8.x'
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/
+      toxenv: py38
 
 - job: wptrunner_unittest_macOS
   displayName: 'tools/wptrunner/ unittests: macOS'
@@ -124,11 +170,49 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
   pool:
     vmImage: 'macOS-10.14'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/wptrunner/
+      toxenv: py27
+
+- job: wptrunner_unittest_macOS_py3
+  displayName: 'tools/wptrunner/ unittests: macOS (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wptrunner/
+      toxenv: py36
+
+- job: wptrunner_unittest_macOS_py38
+  displayName: 'tools/wptrunner/ unittests: macOS (Python 3.8)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.8.x'
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wptrunner/
+      toxenv: py38
 
 - job: wpt_integration_macOS
   displayName: 'tools/wpt/ tests: macOS'
@@ -136,8 +220,13 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.wpt_integration']
   pool:
     vmImage: 'macOS-10.14'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
   # full checkout required
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/install_chrome.yml
   - template: tools/ci/azure/install_firefox.yml
   - template: tools/ci/azure/update_hosts.yml
@@ -145,6 +234,55 @@ jobs:
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/wpt/
+      toxenv: py27
+
+- job: wpt_integration_macOS_py3
+  displayName: 'tools/wpt/ tests: macOS (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wpt_integration']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  # full checkout required
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+  # Python 2.7 still needed to update manifest.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
+  - template: tools/ci/azure/install_chrome.yml
+  - template: tools/ci/azure/install_firefox.yml
+  - template: tools/ci/azure/update_hosts.yml
+  - template: tools/ci/azure/update_manifest.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wpt/
+      toxenv: py36
+
+- job: wpt_integration_macOS_py38
+  displayName: 'tools/wpt/ tests: macOS (Python 3.8)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wpt_integration']
+  pool:
+    vmImage: 'macOS-10.14'
+  steps:
+  # full checkout required
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.8.x'
+  # Python 2.7 still needed to update manifest.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
+  - template: tools/ci/azure/install_chrome.yml
+  - template: tools/ci/azure/install_firefox.yml
+  - template: tools/ci/azure/update_hosts.yml
+  - template: tools/ci/azure/update_manifest.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wpt/
+      toxenv: py38
 
 - job: tools_unittest_win
   displayName: 'tools/ unittests: Windows'
@@ -152,6 +290,8 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.tools_unittest']
   pool:
     vmImage: 'windows-2019'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
   - task: UsePythonVersion@0
     inputs:
@@ -163,7 +303,26 @@ jobs:
       toxenv: py27
 
 - job: tools_unittest_win_py3
-  displayName: 'tools/ unittests: Windows Python 3'
+  displayName: 'tools/ unittests: Windows (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.tools_unittest']
+  pool:
+    vmImage: 'windows-2019'
+  variables:
+    HYPOTHESIS_PROFILE: ci
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+      addToPath: false
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/
+      toxenv: py36
+
+- job: tools_unittest_win_py38
+  displayName: 'tools/ unittests: Windows (Python 3.8)'
   dependsOn: decision
   condition: dependencies.decision.outputs['test_jobs.tools_unittest']
   pool:
@@ -171,12 +330,13 @@ jobs:
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.6.x'
+      versionSpec: '3.8.x'
+      addToPath: false
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/
-      toxenv: py36
+      toxenv: py38
 
 - job: wptrunner_unittest_win
   displayName: 'tools/wptrunner/ unittests: Windows'
@@ -184,6 +344,8 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
   pool:
     vmImage: 'windows-2019'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
   - task: UsePythonVersion@0
     inputs:
@@ -192,6 +354,41 @@ jobs:
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/wptrunner/
+      toxenv: py27
+
+- job: wptrunner_unittest_win_py3
+  displayName: 'tools/wptrunner/ unittests: Windows (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
+  pool:
+    vmImage: 'windows-2019'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+      addToPath: false
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wptrunner/
+      toxenv: py36
+
+- job: wptrunner_unittest_win_py38
+  displayName: 'tools/wptrunner/ unittests: Windows (Python 3.8)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wptrunner_unittest']
+  pool:
+    vmImage: 'windows-2019'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.8.x'
+      addToPath: false
+  - template: tools/ci/azure/checkout.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wptrunner/
+      toxenv: py38
 
 - job: wpt_integration_win
   displayName: 'tools/wpt/ tests: Windows'
@@ -199,6 +396,8 @@ jobs:
   condition: dependencies.decision.outputs['test_jobs.wpt_integration']
   pool:
     vmImage: 'windows-2019'
+  variables:
+    HYPOTHESIS_PROFILE: ci
   steps:
   # full checkout required
   - task: UsePythonVersion@0
@@ -213,6 +412,63 @@ jobs:
   - template: tools/ci/azure/tox_pytest.yml
     parameters:
       directory: tools/wpt/
+      toxenv: py27
+
+- job: wpt_integration_win_py3
+  displayName: 'tools/wpt/ tests: Windows (Python 3.6)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wpt_integration']
+  pool:
+    vmImage: 'windows-2019'
+  steps:
+  # full checkout required
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.6.x'
+      addToPath: false
+  # Python 2.7 still needed to update manifest.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
+      addToPath: true
+  # currently just using the outdated Chrome/Firefox on the VM rather than
+  # figuring out how to install Chrome Dev channel on Windows
+  # - template: tools/ci/azure/install_chrome.yml
+  # - template: tools/ci/azure/install_firefox.yml
+  - template: tools/ci/azure/update_hosts.yml
+  - template: tools/ci/azure/update_manifest.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wpt/
+      toxenv: py36
+
+- job: wpt_integration_win_py38
+  displayName: 'tools/wpt/ tests: Windows (Python 3.8)'
+  dependsOn: decision
+  condition: dependencies.decision.outputs['test_jobs.wpt_integration']
+  pool:
+    vmImage: 'windows-2019'
+  steps:
+  # full checkout required
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.8.x'
+      addToPath: false
+  # Python 2.7 still needed to update manifest.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
+      addToPath: true
+  # currently just using the outdated Chrome/Firefox on the VM rather than
+  # figuring out how to install Chrome Dev channel on Windows
+  # - template: tools/ci/azure/install_chrome.yml
+  # - template: tools/ci/azure/install_firefox.yml
+  - template: tools/ci/azure/update_hosts.yml
+  - template: tools/ci/azure/update_manifest.yml
+  - template: tools/ci/azure/tox_pytest.yml
+    parameters:
+      directory: tools/wpt/
+      toxenv: py38
 
 - job: infrastructure_win10
   displayName: 'infrastructure/ tests: Windows 10'
@@ -360,6 +616,9 @@ jobs:
   pool:
     vmImage: 'macOS-10.14'
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/pip_install.yml
     parameters:
@@ -394,6 +653,9 @@ jobs:
   pool:
     vmImage: 'macOS-10.14'
   steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '2.7.x'
   - template: tools/ci/azure/checkout.yml
   - template: tools/ci/azure/pip_install.yml
     parameters:
