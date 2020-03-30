@@ -24,7 +24,7 @@ use style::attr::{AttrIdentifier, AttrValue};
 
 // https://dom.spec.whatwg.org/#interface-attr
 #[dom_struct]
-pub struct Attr {
+pub struct Attr {   //Root<DomrefCell<submit>>
     node_: Node,
     identifier: AttrIdentifier,
     value: DomRefCell<AttrValue>,

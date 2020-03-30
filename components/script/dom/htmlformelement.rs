@@ -18,7 +18,7 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::Windo
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
-use crate::dom::bindings::root::{Dom, DomOnceCell, DomRoot};
+use crate::dom::bindings::root::{Root, Dom, DomOnceCell, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::Blob;
 use crate::dom::document::Document;
@@ -73,6 +73,7 @@ use std::collections::HashMap;
 use time::{now, Duration, Tm};
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{NodeConstants, NodeMethods};
+use std::result::Result;
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct GenerationId(u32);
@@ -245,38 +246,54 @@ impl HTMLFormElementMethods for HTMLFormElement {
 
 
     //request_submit API
-    fn requestSubmit(&self, submitter: HTMLFormElement) -> Fallible<DOMString>{
+    fn RequestSubmit(&self, submitter: Option<&HTMLElement>) -> DOMString{
 
         //step1: check if submitter is not null
-        if submitter{
+        
+         
+         if let Some(e) = submitter{
        
         //step2: if step1, check if submittter is not a submit button-throw error
-           
-            if !is_submit_button(submitter){
-                let error = get_error_data_by_code(TYPE_MISMATCH_ERR);
-                return error;
+            
+            let element = e.upcast::<Element>();
+            
+            if !element.is_submit_button(){
+                let err_notFoundError = "Not Found Error".to_string(); 
+                return DOMString::from_string(err_notFoundError);
+                
             }
+
+            else{
        
         //step3: if submitter's form  owner isn't the current element, throw error
-            let controlObject = submitter.as_maybe_form_control();
-            let submitterFormOwner = controlObject.form_owner();
-            let selfFormOwner = self.form_owner();
+           
+            let controlObject = element.as_maybe_form_control();
 
-            if submitterFormOwner != selfFormOwner{
-                return Err(Error::Type("Not Found Error".to_string()));
-            }
+            if let Some(c) = controlObject {
+            let submitterFormOwner = c.form_owner();
+           // let selfFormOwner = self.form_owner();
+           
+           if submitterFormOwner != Some(Root::<Dom::<Self>>){
+            let err_mismatchError = "Mismatch Error".to_string();
+            return DOMString::from_string(err_mismatchError);
         }
+    }
 
-        //step4: step1 ka else:- set submitter to this form element
+            
+        }
+        
+     }
+        
+         //step4: step1 else:- set submitter to this form element
         else{
-            submitter = self.set_form_owner();
+             submitter.set_form_owner(self);
         }
 
         //step 5: submit() fn ka use
-        submitter.submit(SubmittedFrom::FromForm, FormSubmitter::FormElement(submitter));
+        self.submit(SubmittedFrom::FromForm, FormSubmitter::FormElement(&self));
     }
 
-    
+
     // https://html.spec.whatwg.org/multipage/#dom-form-reset
     fn Reset(&self) {
         self.reset(ResetFrom::FromForm);
@@ -1393,6 +1410,7 @@ pub trait FormControl: DomObject {
         true
     }
 
+ 
     // https://html.spec.whatwg.org/multipage/#create-an-element-for-the-token
     // Part of step 12.
     // '..suppress the running of the reset the form owner algorithm
@@ -1553,21 +1571,23 @@ pub trait FormControl: DomObject {
             self.form_owner().map_or(false, |t| owner(&t))
         }
     }
-
-
-    fn is_submit_button(submitter: HTMLFormElement) -> bool{
-       
-        let typeCheck = submitter.get_attribute(&self, name: 'type');
-
-        if assert!(typeCheck, "submit"){
-           return true;
+/*
+    fn try_to_do_stuff(submitter: Option<i32>) {
+        match submitter {
+            Some(whats_inside) => { /* do something with whats_inside */},
+            None => { /* there was nothing inside */}
         }
-        else{
-            return false;
-        }
-           
     }
+    fn try_to_do_stuff2(submitter: Option<i32>) {
+        if let Some(whats_inside) = submitter {
+            /* do something with whats_inside */
+        } else {
+            /* there was nothing inside */
+        }
+         }
+*/
 
+   
     // XXXKiChjang: Implement these on inheritors
     // fn candidate_for_validation(&self) -> bool;
     // fn satisfies_constraints(&self) -> bool;
@@ -1603,9 +1623,29 @@ impl VirtualMethods for HTMLFormElement {
 
 pub trait FormControlElementHelpers {
     fn as_maybe_form_control<'a>(&'a self) -> Option<&'a dyn FormControl>;
+    fn is_submit_button(&self) -> bool;
 }
 
 impl FormControlElementHelpers for Element {
+    
+    fn is_submit_button(&self) -> bool{
+       
+            let typeCheck = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("type"));
+            // typeCheck = Some("submit")
+            // typeCheck = Some("number")
+            // typeCheck = None
+
+            if typeCheck == Some("submit") {
+               true
+            } else{
+                false
+            }
+        
+        
+    }
+
+
+
     fn as_maybe_form_control<'a>(&'a self) -> Option<&'a dyn FormControl> {
         let node = self.upcast::<Node>();
 
