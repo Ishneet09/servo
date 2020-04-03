@@ -246,7 +246,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
 
 
     //request_submit API
-    fn RequestSubmit(&self, submitter: Option<&HTMLElement>) -> DOMString{
+    fn RequestSubmit(&self, submitter: Option<&HTMLElement>) -> Result((), ){
 
         //step1: check if submitter is not null
         
@@ -273,7 +273,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
             let submitterFormOwner = c.form_owner();
            // let selfFormOwner = self.form_owner();
            
-           if submitterFormOwner != Some(Root::<Dom::<Self>>){
+           if submitterFormOwner != Some(self){
             let err_mismatchError = "Mismatch Error".to_string();
             return DOMString::from_string(err_mismatchError);
         }
@@ -1630,12 +1630,12 @@ impl FormControlElementHelpers for Element {
     
     fn is_submit_button(&self) -> bool{
        
-            let typeCheck = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("type"));
+            let typeCheck = self.upcast::<Element>().get_string_attribute(&local_name!("type"));
             // typeCheck = Some("submit")
             // typeCheck = Some("number")
             // typeCheck = None
 
-            if typeCheck == Some("submit") {
+            if typeCheck == "submit" {
                true
             } else{
                 false
