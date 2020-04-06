@@ -291,7 +291,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
         
          //step4: step1 else:- set submitter to this form element
         else{
-             submitter = Some(self);
+             submitter = Some(self.upcast::<HTMLElement>());
         }
 
         //step 5: submit() fn ka use
