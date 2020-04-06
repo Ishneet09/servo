@@ -32,7 +32,7 @@ interface HTMLFormElement : HTMLElement {
   getter (RadioNodeList or Element) (DOMString name);
 
   void submit();
-  DOMString RequestSubmit(optional HTMLElement? submitter = null);
+  [Throws] void RequestSubmit(optional HTMLElement? submitter = null);
 
   [CEReactions]
   void reset();

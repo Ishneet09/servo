@@ -74,6 +74,8 @@ use time::{now, Duration, Tm};
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{NodeConstants, NodeMethods};
 use std::result::Result;
+use crate::dom::bindings::error::Error;
+
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct GenerationId(u32);
@@ -246,7 +248,8 @@ impl HTMLFormElementMethods for HTMLFormElement {
 
 
     //request_submit API
-    fn RequestSubmit(&self, submitter: Option<&HTMLElement>) -> Result((), ){
+    
+     fn RequestSubmit(&self, submitter: Option<&HTMLElement>) -> Result<(), Error>{
 
         //step1: check if submitter is not null
         
@@ -258,8 +261,9 @@ impl HTMLFormElementMethods for HTMLFormElement {
             let element = e.upcast::<Element>();
             
             if !element.is_submit_button(){
-                let err_notFoundError = "Not Found Error".to_string(); 
-                return DOMString::from_string(err_notFoundError);
+               /* let err_notFoundError = "Not Found Error".to_string(); 
+                return DOMString::from_string(err_notFoundError);*/
+                 return Err(Error::NotFound);
                 
             }
 
@@ -274,8 +278,9 @@ impl HTMLFormElementMethods for HTMLFormElement {
            // let selfFormOwner = self.form_owner();
            
            if submitterFormOwner != Some(self){
-            let err_mismatchError = "Mismatch Error".to_string();
-            return DOMString::from_string(err_mismatchError);
+            /*let err_mismatchError = "Mismatch Error".to_string();
+            return DOMString::from_string(err_mismatchError);*/
+             return Err(Error::TypeMismatch);
         }
     }
 
@@ -286,11 +291,13 @@ impl HTMLFormElementMethods for HTMLFormElement {
         
          //step4: step1 else:- set submitter to this form element
         else{
-             submitter.set_form_owner(self);
+             submitter = Some(self);
         }
 
         //step 5: submit() fn ka use
         self.submit(SubmittedFrom::FromForm, FormSubmitter::FormElement(&self));
+
+        return Ok(());
     }
 
 
